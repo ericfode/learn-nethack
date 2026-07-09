@@ -129,6 +129,55 @@ class StatusDashboardTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            local_watch = artifacts / "local-proof" / "watch"
+            local_watch.mkdir(parents=True)
+            (artifacts / "local-proof" / "report.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "learn-nethack.local-world-model-proof.v1",
+                        "run_id": "local-proof",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (local_watch / "index.html").write_text(
+                "<html>world model</html>",
+                encoding="utf-8",
+            )
+            summary = {
+                key: {"mean": value, "sample_std": 0.01}
+                for key, value in {
+                    "one_step_changed_f1": 0.6,
+                    "next_1_changed_f1": 0.5,
+                    "next_5_changed_f1": 0.4,
+                    "next_10_changed_f1": 0.3,
+                    "action_mrr": 0.7,
+                    "one_step_char_accuracy": 0.9,
+                }.items()
+            }
+            (artifacts / "local-world-model-aggregate.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "learn-nethack.local-world-model-aggregate.v1",
+                        "verdict": "not_supported",
+                        "run_count": 3,
+                        "supported_run_count": 0,
+                        "matched_parameter_count": 123,
+                        "variants": {
+                            "deterministic": summary,
+                            "diffusion": summary,
+                        },
+                        "diffusion_minus_deterministic": {
+                            key: {"mean": -0.1} for key in summary
+                        },
+                        "failure_summary": {
+                            "action_mrr_nonpositive_delta_runs": 3,
+                            "diffusion_next_10_f1_range": 0.2,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             result = write_status_dashboard(
                 repo_root=root,
@@ -160,6 +209,9 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertEqual(snapshot["modal_apps"]["apps"][0]["app_id"], "ap-test")
         self.assertIn("ap-test", html)
         self.assertIn("demo-watch", html)
+        self.assertEqual(snapshot["world_model_proof"]["verdict"], "not_supported")
+        self.assertIn("Local Decoder Proof", html)
+        self.assertIn("World model: local-proof", html)
         self.assertIn("live_rollout_utility_v7", html)
         self.assertEqual(snapshot["goal_status"]["build_activity"], "running")
         self.assertIn("full build still running", html)

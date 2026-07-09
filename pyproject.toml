@@ -19,6 +19,12 @@ local-nle = [
   "gymnasium>=0.29",
   "nle>=1.3.0",
 ]
+local-world-model = [
+  "gymnasium>=0.29",
+  "nle>=1.3.0",
+  "numpy>=1.26",
+  "torch>=2.3",
+]
 watch = [
   "gymnasium>=0.29",
   "nle>=1.3.0",
@@ -47,6 +53,7 @@ modal-vllm = [
 
 [project.scripts]
 nethack-gemma = "learn_nethack.cli:app"
+nethack-world-model = "learn_nethack.local_world_model:app"
 
 [build-system]
 requires = ["setuptools>=69"]

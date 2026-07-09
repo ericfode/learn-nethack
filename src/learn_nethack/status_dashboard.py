@@ -104,6 +104,7 @@ def build_dashboard_snapshot(
     watch_demos = _collect_watch_demos(artifacts)
     score_reports = _collect_score_reports(artifacts)
     proof_gates = _collect_proof_gates(artifacts)
+    world_model_proof = _collect_world_model_proof(artifacts)
     training_reports = _collect_training_reports(artifacts)
     goal_status = _goal_status(
         full_build=full_build,
@@ -130,6 +131,7 @@ def build_dashboard_snapshot(
         "watch_demos": watch_demos,
         "score_reports": score_reports,
         "proof_gates": proof_gates,
+        "world_model_proof": world_model_proof,
         "training_reports": training_reports,
         "todo": _build_todo_items(
             full_build=full_build,
@@ -157,6 +159,7 @@ def render_dashboard_html(*, snapshot: Mapping[str, Any], html_path: Path) -> st
     demos = list(snapshot.get("watch_demos") or [])
     score_reports = list(snapshot.get("score_reports") or [])
     proof_gates = list(snapshot.get("proof_gates") or [])
+    world_model_proof = dict(snapshot.get("world_model_proof") or {})
     modal_apps = dict(snapshot.get("modal_apps") or {})
     todo = list(snapshot.get("todo") or [])
 
@@ -233,6 +236,10 @@ def render_dashboard_html(*, snapshot: Mapping[str, Any], html_path: Path) -> st
             "<h2>Evaluation And Proof</h2>",
             _score_reports_html(score_reports),
             _proof_gate_html(proof_gates),
+            "</section>",
+            '<section class="panel">',
+            "<h2>Local Decoder Proof</h2>",
+            _world_model_proof_html(world_model_proof, html_path),
             "</section>",
             '<section class="panel">',
             "<h2>Live Demos</h2>",
@@ -418,6 +425,23 @@ def _collect_watch_demos(artifacts: Path) -> list[dict[str, Any]]:
     demos: list[dict[str, Any]] = []
     for report_path in reports:
         payload = _read_json(report_path, fallback={})
+        if payload.get("schema_version") == "learn-nethack.local-world-model-proof.v1":
+            index_path = report_path.parent / "watch" / "index.html"
+            if index_path.exists():
+                demos.append(
+                    {
+                        "run_id": payload.get("run_id") or report_path.parent.name,
+                        "kind": "world-model",
+                        "report_path": str(report_path),
+                        "demo_path": str(index_path),
+                        "demo_label": f"World model: {report_path.parent.name}",
+                        "mtime": report_path.stat().st_mtime,
+                        "current": {},
+                        "baseline": {},
+                        "deltas": {},
+                    }
+                )
+            continue
         if not isinstance(payload.get("rollout_metrics"), Mapping):
             continue
         run_id = str(payload.get("run_id") or report_path.parent.name)
@@ -543,6 +567,23 @@ def _collect_proof_gates(artifacts: Path) -> list[dict[str, Any]]:
         key=lambda row: (float(row.get("mtime") or 0.0), row["path"]), reverse=True
     )
     return rows[:6]
+
+
+def _collect_world_model_proof(artifacts: Path) -> dict[str, Any]:
+    candidates = sorted(
+        artifacts.glob("**/*world-model*aggregate*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        payload = _read_json(path, fallback={})
+        if (
+            payload.get("schema_version")
+            != "learn-nethack.local-world-model-aggregate.v1"
+        ):
+            continue
+        return {**payload, "path": str(path), "mtime": path.stat().st_mtime}
+    return {}
 
 
 def _collect_training_reports(artifacts: Path) -> list[dict[str, Any]]:
@@ -743,6 +784,65 @@ def _proof_gate_html(rows: Sequence[Mapping[str, Any]]) -> str:
             "</div>",
         ]
     )
+
+
+def _world_model_proof_html(
+    proof: Mapping[str, Any],
+    html_path: Path,
+) -> str:
+    if not proof:
+        return '<p class="muted">No local decoder comparison found.</p>'
+    variants = dict(proof.get("variants") or {})
+    deterministic = dict(variants.get("deterministic") or {})
+    diffusion = dict(variants.get("diffusion") or {})
+    deltas = dict(proof.get("diffusion_minus_deterministic") or {})
+    rows = []
+    for label, key in (
+        ("One-step changed F1", "one_step_changed_f1"),
+        ("Next-1 changed F1", "next_1_changed_f1"),
+        ("Next-5 changed F1", "next_5_changed_f1"),
+        ("Next-10 changed F1", "next_10_changed_f1"),
+        ("Action MRR", "action_mrr"),
+        ("One-step char accuracy", "one_step_char_accuracy"),
+    ):
+        rows.append(
+            "<tr>"
+            f"<td>{_esc(label)}</td>"
+            f"<td>{_aggregate_mean_std(deterministic.get(key))}</td>"
+            f"<td>{_aggregate_mean_std(diffusion.get(key))}</td>"
+            f"<td>{_aggregate_delta(deltas.get(key))}</td>"
+            "</tr>"
+        )
+    aggregate_path = Path(str(proof.get("path")))
+    aggregate_url = _relative_url(html_path.parent, aggregate_path)
+    failures = dict(proof.get("failure_summary") or {})
+    verdict = str(proof.get("verdict") or "unknown")
+    return "".join(
+        [
+            '<div class="proof-box">',
+            f"<h3>Diffusion replacement: {_esc(verdict)}</h3>",
+            f"<p>{_format_int(proof.get('supported_run_count'))} of {_format_int(proof.get('run_count'))} training seeds passed the pre-registered gate. "
+            f"Diffusion lost action MRR in {_format_int(failures.get('action_mrr_nonpositive_delta_runs'))} runs.</p>",
+            "<table><thead><tr><th>Metric</th><th>Deterministic</th><th>Diffusion</th><th>Delta</th></tr></thead>",
+            f"<tbody>{''.join(rows)}</tbody></table>",
+            f'<p class="muted">Matched parameters: {_format_int(proof.get("matched_parameter_count"))}. '
+            f"Diffusion next-10 F1 range: {_num(failures.get('diffusion_next_10_f1_range'))}. "
+            f'<a href="{_esc(aggregate_url)}">Aggregate JSON</a></p>',
+            "</div>",
+        ]
+    )
+
+
+def _aggregate_mean_std(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return "n/a"
+    return f"{_num(value.get('mean'))} +/- {_num(value.get('sample_std'))}"
+
+
+def _aggregate_delta(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return "n/a"
+    return _num(value.get("mean"), signed=True)
 
 
 def _demo_buttons_html(demos: Sequence[Mapping[str, Any]], html_path: Path) -> str:
