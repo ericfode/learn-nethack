@@ -1,0 +1,33 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+.cache/
+
+# Local tool state
+.modal/
+.wandb/
+wandb/
+.env
+.env.*
+
+# Generated project outputs
+artifacts/
+outputs/
+runs/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.ttyrec
+*.gif
+*.mp4
+
+# Data boundaries: source NetHack data lives outside git.
+data/
+nld/
+nle/

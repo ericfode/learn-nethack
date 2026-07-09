@@ -1,0 +1,28 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+allow_login_shell = true
+
+[sandbox_workspace_write]
+network_access = true
+writable_roots = [
+  "/Users/ericfode/Documents/learn-nethack",
+  "/private/tmp",
+  "/private/var/folders/qk/fd8vdrxn2tddl_02lm8sy3nc0000gn/T",
+]
+exclude_tmpdir_env_var = false
+exclude_slash_tmp = false
+
+[shell_environment_policy]
+inherit = "all"
+
+[shell_environment_policy.set]
+UV_PYTHON = "3.11"
+UV_PROJECT_ENVIRONMENT = ".venv"
+PYTHONPATH = "src"
+UV_CACHE_DIR = ".uv-cache"
+WANDB_PROJECT = "learn-nethack"
+HF_HOME = ".cache/huggingface"
+TRANSFORMERS_CACHE = ".cache/huggingface"
+TERM = "xterm-256color"
