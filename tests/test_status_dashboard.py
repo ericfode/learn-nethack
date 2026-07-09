@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from learn_nethack.status_dashboard import write_status_dashboard
+from learn_nethack.status_dashboard import _goal_status, write_status_dashboard
 
 
 class StatusDashboardTests(unittest.TestCase):
@@ -141,7 +141,7 @@ class StatusDashboardTests(unittest.TestCase):
                         [
                             {
                                 "app_id": "ap-test",
-                                "description": "fixture",
+                                "description": "learn-nethack-gemma",
                                 "state": "ephemeral (detached)",
                                 "tasks": "1",
                             }
@@ -161,7 +161,30 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("ap-test", html)
         self.assertIn("demo-watch", html)
         self.assertIn("live_rollout_utility_v7", html)
-        self.assertIn("Goal active", html)
+        self.assertEqual(snapshot["goal_status"]["build_activity"], "running")
+        self.assertIn("full build still running", html)
+
+    def test_goal_status_marks_incomplete_build_stalled_without_matching_task(
+        self,
+    ) -> None:
+        status = _goal_status(
+            full_build={"build_run_id": "build-run", "train_ready": False},
+            baseline_eval={"eval_ready": True},
+            proof_gates=[],
+            modal_apps={
+                "status": "ok",
+                "apps": [
+                    {
+                        "description": "unrelated-deployment",
+                        "state": "deployed",
+                        "tasks": "0",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(status["build_activity"], "stalled")
+        self.assertEqual(status["label"], "Goal blocked: full build stalled")
 
 
 if __name__ == "__main__":

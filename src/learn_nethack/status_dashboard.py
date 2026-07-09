@@ -12,6 +12,7 @@ import subprocess
 from typing import Any, Callable, Mapping, Sequence
 
 from learn_nethack.compare_watch import FITNESS_OBJECTIVE_VERSION
+from learn_nethack.modal_config import MODAL_APP_NAME
 from learn_nethack.wandb_logging import build_wandb_visibility_report
 
 
@@ -108,6 +109,7 @@ def build_dashboard_snapshot(
         full_build=full_build,
         baseline_eval=baseline_eval,
         proof_gates=proof_gates,
+        modal_apps=modal_apps,
     )
     return {
         "schema_version": DASHBOARD_SCHEMA_VERSION,
@@ -265,12 +267,35 @@ def _goal_status(
     full_build: Mapping[str, Any],
     baseline_eval: Mapping[str, Any],
     proof_gates: Sequence[Mapping[str, Any]],
+    modal_apps: Mapping[str, Any],
 ) -> dict[str, str]:
     if not full_build.get("train_ready"):
+        build_activity = _full_build_activity(
+            full_build=full_build,
+            modal_apps=modal_apps,
+        )
+        if build_activity == "running":
+            return {
+                "label": "Goal active: full build still running",
+                "tone": "warn",
+                "reason": "An active Modal build task exists; completion markers are missing.",
+                "build_activity": build_activity,
+            }
+        if build_activity == "stalled":
+            return {
+                "label": "Goal blocked: full build stalled",
+                "tone": "bad",
+                "reason": (
+                    "No active Modal task matches this build and completion markers "
+                    "are missing."
+                ),
+                "build_activity": build_activity,
+            }
         return {
-            "label": "Goal active: full build still running",
+            "label": "Goal active: full build incomplete",
             "tone": "warn",
-            "reason": "The full dataset is not train-ready yet.",
+            "reason": "The full dataset is not train-ready; Modal activity is unknown.",
+            "build_activity": build_activity,
         }
     if not baseline_eval.get("eval_ready"):
         return {
@@ -290,6 +315,31 @@ def _goal_status(
         "tone": "bad",
         "reason": "No current proof gate proves full-dataset improvement.",
     }
+
+
+def _full_build_activity(
+    *,
+    full_build: Mapping[str, Any],
+    modal_apps: Mapping[str, Any],
+) -> str:
+    if modal_apps.get("status") != "ok":
+        return "unknown"
+    build_run_id = str(full_build.get("build_run_id") or "")
+    for app in modal_apps.get("apps") or []:
+        description = str(_first_present(app, "description", "Description") or "")
+        describes_build = description == MODAL_APP_NAME or (
+            bool(build_run_id) and build_run_id in description
+        )
+        if describes_build and _has_active_tasks(_first_present(app, "tasks", "Tasks")):
+            return "running"
+    return "stalled"
+
+
+def _has_active_tasks(value: Any) -> bool:
+    try:
+        return int(str(value).strip()) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _build_todo_items(
