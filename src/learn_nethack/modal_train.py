@@ -2136,6 +2136,7 @@ def _watch_compare_impl(
         }
 
     wandb_mode = resolve_wandb_mode(os.environ)
+    event_callback = _modal_watch_event_logger()
     wandb, run, wandb_report = initialize_watch_wandb_run(
         contract=contract,
         contract_path=contract_path,
@@ -2155,6 +2156,7 @@ def _watch_compare_impl(
             seed=seed,
             max_steps=max_steps,
             device=device,
+            event_callback=event_callback,
         )
     except Exception as exc:
         record_watch_failure(
@@ -2309,6 +2311,7 @@ def _watch_compare_sweep_impl(
         }
 
     wandb_mode = resolve_wandb_mode(os.environ)
+    event_callback = _modal_watch_event_logger()
     wandb, run, wandb_report = initialize_watch_wandb_run(
         contract=contract,
         contract_path=contract_path,
@@ -2328,6 +2331,7 @@ def _watch_compare_sweep_impl(
             seeds=contract["watch"]["seeds"],
             max_steps=max_steps,
             device=device,
+            event_callback=event_callback,
         )
     except Exception as exc:
         record_watch_failure(
@@ -2381,6 +2385,42 @@ def _watch_compare_sweep_impl(
     _commit_mounted_volume("/watch")
     _commit_mounted_volume("/runs")
     return watch_report
+
+
+def _modal_watch_event_logger(
+    *,
+    commit_interval_steps: int = 4,
+) -> Callable[[dict[str, Any]], None]:
+    """Publish concise rollout progress and periodically commit live watch state."""
+    if commit_interval_steps <= 0:
+        raise ValueError("commit_interval_steps must be positive")
+
+    def _log(event: dict[str, Any]) -> None:
+        current = dict(event.get("current") or {})
+        baseline = dict(event.get("baseline") or {})
+        payload = {
+            "schema_version": "learn-nethack.watch-progress.v1",
+            "run_id": event.get("run_id"),
+            "seed": event.get("seed"),
+            "character": event.get("character"),
+            "step": event.get("step"),
+            "current_action_id": current.get("action_id"),
+            "baseline_action_id": baseline.get("action_id"),
+            "current_reward": current.get("cumulative_reward"),
+            "baseline_reward": baseline.get("cumulative_reward"),
+            "current_done": bool(current.get("done", False)),
+            "baseline_done": bool(baseline.get("done", False)),
+        }
+        print(json.dumps(payload, sort_keys=True), flush=True)
+        step = int(event.get("step", 0))
+        if (
+            (step + 1) % commit_interval_steps == 0
+            or payload["current_done"]
+            or payload["baseline_done"]
+        ):
+            _commit_mounted_volume("/watch")
+
+    return _log
 
 
 def _watch_sweep_artifact_file_entries(

@@ -1571,6 +1571,31 @@ class ModalReadinessTests(unittest.TestCase):
             )
         )
 
+    def test_modal_watch_event_logger_commits_periodically_and_on_done(self) -> None:
+        modal_train = importlib.import_module("learn_nethack.modal_train")
+        event = {
+            "run_id": "watch",
+            "seed": 101,
+            "character": "arc-hum-law-mal",
+            "step": 0,
+            "current": {"action_id": 1, "done": False},
+            "baseline": {"action_id": 2, "done": False},
+        }
+        with patch.object(modal_train, "_commit_mounted_volume") as commit:
+            logger = modal_train._modal_watch_event_logger(commit_interval_steps=4)
+            logger(event)
+            commit.assert_not_called()
+            logger({**event, "step": 3})
+            commit.assert_called_once_with("/watch")
+            logger(
+                {
+                    **event,
+                    "step": 4,
+                    "current": {"action_id": 1, "done": True},
+                }
+            )
+            self.assertEqual(commit.call_count, 2)
+
     def test_local_sft_eval_contract_rejects_ambiguous_existing_source(self) -> None:
         modal_train = importlib.import_module("learn_nethack.modal_train")
 

@@ -407,6 +407,7 @@ def run_checkpoint_compare(
     seed: int = 20260615,
     max_steps: int = 80,
     device: str | None = None,
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run the current adapter and base Gemma side by side in seeded NLE envs."""
     manifest = load_action_manifest(action_manifest_path)
@@ -446,6 +447,7 @@ def run_checkpoint_compare(
             seed=seed,
             max_steps=max_steps,
             character=character,
+            event_callback=event_callback,
         )
     finally:
         current_env.close()
@@ -464,6 +466,7 @@ def run_checkpoint_compare_sweep(
     character: str = DEFAULT_NLE_CHARACTER,
     max_steps: int = 80,
     device: str | None = None,
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run a multi-seed checkpoint comparison while reusing loaded policies."""
     manifest = load_action_manifest(action_manifest_path)
@@ -509,6 +512,7 @@ def run_checkpoint_compare_sweep(
         seeds=seed_values,
         max_steps=max_steps,
         characters=character_values,
+        event_callback=event_callback,
     )
 
 
@@ -546,6 +550,7 @@ def run_side_by_side_rollout(
     seed: int,
     max_steps: int,
     character: str | None = None,
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run paired rollouts and write JSONL events, report, and static viewer."""
     target = Path(out_dir)
@@ -629,6 +634,8 @@ def run_side_by_side_rollout(
             handle.write(line + "\n")
             handle.flush()
             latest_path.write_text(line + "\n", encoding="utf-8")
+            if event_callback is not None:
+                event_callback(event)
             if current_done and baseline_done:
                 break
 
@@ -713,6 +720,7 @@ def run_side_by_side_rollout_sweep(
     seeds: Sequence[int],
     max_steps: int,
     characters: str | Sequence[str] = DEFAULT_NLE_CHARACTER,
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run paired rollouts across seeds and write an aggregate report."""
     seed_values = parse_seed_list(seeds)
@@ -741,6 +749,7 @@ def run_side_by_side_rollout_sweep(
                 seed=seed,
                 max_steps=max_steps,
                 character=character,
+                event_callback=event_callback,
             )
         finally:
             current_env.close()

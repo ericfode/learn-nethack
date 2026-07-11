@@ -379,7 +379,6 @@ class CompareWatchTests(unittest.TestCase):
             out_dir = Path(tmp)
             current_policy = ScriptedPolicy(preferred_action_id=1)
             baseline_policy = ScriptedPolicy(preferred_action_id=0)
-
             report = run_side_by_side_rollout(
                 run_id="compare-smoke",
                 current_spec=ModelWatchSpec(
@@ -530,6 +529,7 @@ class CompareWatchTests(unittest.TestCase):
             out_dir = Path(tmp)
             current_policy = ScriptedPolicy(preferred_action_id=1)
             baseline_policy = ScriptedPolicy(preferred_action_id=0)
+            emitted_events: list[dict] = []
 
             report = run_side_by_side_rollout_sweep(
                 run_id="compare-sweep",
@@ -552,6 +552,7 @@ class CompareWatchTests(unittest.TestCase):
                 seeds=[101, 202],
                 max_steps=2,
                 characters="arc-hum-law-mal,wiz-elf-cha-mal",
+                event_callback=emitted_events.append,
             )
 
             report_path = out_dir / "sweep_report.json"
@@ -571,6 +572,8 @@ class CompareWatchTests(unittest.TestCase):
             )
             self.assertEqual(report["paired_initial_state_equal_count"], 2)
             self.assertEqual(report["total_event_count"], 4)
+            self.assertEqual(len(emitted_events), 4)
+            self.assertEqual(emitted_events[0]["character"], "arc-hum-law-mal")
             self.assertEqual(
                 report["rollout_metrics"]["deltas"]["cumulative_reward"], 2.0
             )
