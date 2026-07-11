@@ -17,7 +17,11 @@ from learn_nethack.paired_nle import (
     PAIRED_CHALLENGE_ENV_ID,
 )
 from learn_nethack import policy_feedback
-from learn_nethack.sft_rows import POLICY_SYSTEM_PROMPT
+from learn_nethack.sft_rows import (
+    build_policy_prompt,
+    HistoryBuffer,
+    POLICY_SYSTEM_PROMPT,
+)
 from learn_nethack.ttyrec import write_terminal_ttyrec
 
 
@@ -67,13 +71,24 @@ class ModelWatchSpec:
     role: str
     model_name: str
     adapter_checkpoint: str | None
+    context_mode: str = "feedback_context_6"
+    context_token_budget: int = 2_048
+
+    def __post_init__(self) -> None:
+        if self.context_token_budget <= 0:
+            raise ValueError("context_token_budget must be positive")
+        HistoryBuffer(max_items=1).history_for(
+            gameid=0,
+            mode=self.context_mode,
+            token_budget=self.context_token_budget,
+        )
 
 
 class ActionScoringPolicy(Protocol):
     def score_actions(
         self,
         *,
-        observation_text: str,
+        user_prompt: str,
         valid_action_ids: list[int],
     ) -> dict[int, float]:
         """Return one score per candidate action id."""
@@ -188,23 +203,12 @@ def format_action_candidate(action_id: int) -> str:
 
 def build_policy_messages(
     *,
-    observation_text: str,
-    valid_action_ids: Sequence[int],
+    user_prompt: str,
 ) -> list[dict[str, str]]:
-    """Build the policy prompt used for candidate-action scoring."""
-    action_ids = [int(action_id) for action_id in valid_action_ids]
+    """Wrap an exact SFT user prompt for candidate-action scoring."""
     return [
         {"role": "system", "content": POLICY_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": "\n".join(
-                [
-                    f"Allowed action_ids: {action_ids}",
-                    "Current observation:",
-                    observation_text,
-                ]
-            ),
-        },
+        {"role": "user", "content": user_prompt},
     ]
 
 
@@ -245,14 +249,11 @@ class TransformerCandidatePolicy:
     def score_actions(
         self,
         *,
-        observation_text: str,
+        user_prompt: str,
         valid_action_ids: list[int],
     ) -> dict[int, float]:
         model, tokenizer, torch = self._load()
-        messages = build_policy_messages(
-            observation_text=observation_text,
-            valid_action_ids=valid_action_ids,
-        )
+        messages = build_policy_messages(user_prompt=user_prompt)
         prompt = _apply_chat_template(tokenizer, messages) + '{"action_id": '
         completions = [f"{int(action_id)}}}" for action_id in valid_action_ids]
         try:
@@ -413,6 +414,8 @@ def run_checkpoint_compare(
     character: str = DEFAULT_NLE_CHARACTER,
     seed: int = 20260615,
     max_steps: int = 80,
+    context_mode: str = "feedback_context_6",
+    context_token_budget: int = 2_048,
     device: str | None = None,
     event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -422,11 +425,15 @@ def run_checkpoint_compare(
         role="current",
         model_name=model_name,
         adapter_checkpoint=current_checkpoint,
+        context_mode=context_mode,
+        context_token_budget=context_token_budget,
     )
     baseline_spec = ModelWatchSpec(
         role="baseline",
         model_name=model_name,
         adapter_checkpoint=None,
+        context_mode=context_mode,
+        context_token_budget=context_token_budget,
     )
     current_env = make_nle_env(env_id, character=character)
     baseline_env = make_nle_env(env_id, character=character)
@@ -472,6 +479,8 @@ def run_checkpoint_compare_sweep(
     env_id: str = "NetHackChallenge-v0",
     character: str = DEFAULT_NLE_CHARACTER,
     max_steps: int = 80,
+    context_mode: str = "feedback_context_6",
+    context_token_budget: int = 2_048,
     device: str | None = None,
     event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -496,11 +505,15 @@ def run_checkpoint_compare_sweep(
         role="current",
         model_name=model_name,
         adapter_checkpoint=current_checkpoint,
+        context_mode=context_mode,
+        context_token_budget=context_token_budget,
     )
     baseline_spec = ModelWatchSpec(
         role="baseline",
         model_name=model_name,
         adapter_checkpoint=None,
+        context_mode=context_mode,
+        context_token_budget=context_token_budget,
     )
     return run_side_by_side_rollout_sweep(
         run_id=run_id,
@@ -595,8 +608,8 @@ def run_side_by_side_rollout(
     baseline_done = False
     current_cumulative_reward = 0.0
     baseline_cumulative_reward = 0.0
-    current_feedback_history: list[dict[str, Any]] = []
-    baseline_feedback_history: list[dict[str, Any]] = []
+    current_policy_history = HistoryBuffer(max_items=16)
+    baseline_policy_history = HistoryBuffer(max_items=16)
     events: list[dict[str, Any]] = []
 
     with events_path.open("w", encoding="utf-8") as handle:
@@ -609,7 +622,7 @@ def run_side_by_side_rollout(
                 valid_action_ids=valid_action_ids,
                 cumulative_reward=current_cumulative_reward,
                 done=current_done,
-                feedback_history=current_feedback_history,
+                policy_history=current_policy_history,
             )
             baseline_result = _advance_side(
                 spec=baseline_spec,
@@ -619,10 +632,8 @@ def run_side_by_side_rollout(
                 valid_action_ids=valid_action_ids,
                 cumulative_reward=baseline_cumulative_reward,
                 done=baseline_done,
-                feedback_history=baseline_feedback_history,
+                policy_history=baseline_policy_history,
             )
-            _append_policy_feedback(current_feedback_history, current_result)
-            _append_policy_feedback(baseline_feedback_history, baseline_result)
             current_obs = current_result.pop("_next_observation")
             baseline_obs = baseline_result.pop("_next_observation")
             current_cumulative_reward = float(current_result["cumulative_reward"])
@@ -1278,6 +1289,8 @@ def write_compare_watch_contract(
     character: str = DEFAULT_NLE_CHARACTER,
     seed: int = 20260615,
     max_steps: int = 80,
+    context_mode: str = "feedback_context_6",
+    context_token_budget: int = 2_048,
 ) -> dict[str, Any]:
     """Write a dry-run contract for a compare-watch run without heavy deps."""
     manifest = load_action_manifest(action_manifest_path)
@@ -1296,6 +1309,8 @@ def write_compare_watch_contract(
                 role="current",
                 model_name=model_name,
                 adapter_checkpoint=current_checkpoint,
+                context_mode=context_mode,
+                context_token_budget=context_token_budget,
             )
         ),
         "baseline": asdict(
@@ -1303,6 +1318,8 @@ def write_compare_watch_contract(
                 role="baseline",
                 model_name=model_name,
                 adapter_checkpoint=None,
+                context_mode=context_mode,
+                context_token_budget=context_token_budget,
             )
         ),
         "action_manifest_path": str(action_manifest_path),
@@ -1327,6 +1344,8 @@ def write_compare_watch_sweep_contract(
     env_id: str = "NetHackChallenge-v0",
     character: str = DEFAULT_NLE_CHARACTER,
     max_steps: int = 80,
+    context_mode: str = "feedback_context_6",
+    context_token_budget: int = 2_048,
 ) -> dict[str, Any]:
     """Write a dry-run multi-seed watch contract without heavy deps."""
     manifest = load_action_manifest(action_manifest_path)
@@ -1352,6 +1371,8 @@ def write_compare_watch_sweep_contract(
                 role="current",
                 model_name=model_name,
                 adapter_checkpoint=current_checkpoint,
+                context_mode=context_mode,
+                context_token_budget=context_token_budget,
             )
         ),
         "baseline": asdict(
@@ -1359,6 +1380,8 @@ def write_compare_watch_sweep_contract(
                 role="baseline",
                 model_name=model_name,
                 adapter_checkpoint=None,
+                context_mode=context_mode,
+                context_token_budget=context_token_budget,
             )
         ),
         "action_manifest_path": str(action_manifest_path),
@@ -1383,18 +1406,32 @@ def _advance_side(
     valid_action_ids: list[int],
     cumulative_reward: float,
     done: bool,
-    feedback_history: Sequence[Mapping[str, Any]],
+    policy_history: HistoryBuffer,
 ) -> dict[str, Any]:
+    observation_text = render_observation_text(observation)
+    context = policy_history.history_for(
+        gameid=0,
+        mode=spec.context_mode,
+        token_budget=spec.context_token_budget,
+    )
+    user_prompt = build_policy_prompt(
+        observation_text=observation_text,
+        valid_action_ids=valid_action_ids,
+        history=context,
+        history_mode=spec.context_mode,
+    )
+    feedback_context = [dict(item) for item in context if isinstance(item, Mapping)]
+    context_payload = _serialize_policy_context(context)
     if done:
-        terminal_frame = render_observation_text(observation)
         return {
             **asdict(spec),
-            "prompt_terminal_frame": terminal_frame,
-            "policy_observation_text": terminal_frame,
+            "prompt_terminal_frame": observation_text,
+            "policy_observation_text": observation_text,
+            "policy_user_prompt": user_prompt,
             "prompt_score": _blstat(observation, 9),
             "prompt_hp": _blstat(observation, 10),
             "prompt_depth": _blstat(observation, 12),
-            "terminal_frame": terminal_frame,
+            "terminal_frame": observation_text,
             "action_id": None,
             "action_label": None,
             "reward": 0.0,
@@ -1408,18 +1445,15 @@ def _advance_side(
             "hunger": None,
             "menu_open": None,
             "game_time_advanced": False,
-            "policy_feedback_length": len(feedback_history),
-            "policy_feedback": list(feedback_history),
+            "policy_context_length": len(context),
+            "policy_context": context_payload,
+            "policy_feedback_length": len(feedback_context),
+            "policy_feedback": feedback_context,
             "_next_observation": observation,
         }
 
-    observation_text = render_observation_text(observation)
-    policy_observation_text = build_policy_observation_with_feedback(
-        observation_text=observation_text,
-        feedback_history=feedback_history,
-    )
     scores = policy.score_actions(
-        observation_text=policy_observation_text,
+        user_prompt=user_prompt,
         valid_action_ids=valid_action_ids,
     )
     action_id = select_action_id(
@@ -1428,10 +1462,11 @@ def _advance_side(
     )
     next_observation, reward, step_done, info = _step_env(env, action_id)
     next_cumulative_reward = cumulative_reward + reward
-    return {
+    result = {
         **asdict(spec),
         "prompt_terminal_frame": observation_text,
-        "policy_observation_text": policy_observation_text,
+        "policy_observation_text": observation_text,
+        "policy_user_prompt": user_prompt,
         "prompt_score": _blstat(observation, 9),
         "prompt_hp": _blstat(observation, 10),
         "prompt_depth": _blstat(observation, 12),
@@ -1451,31 +1486,47 @@ def _advance_side(
         "hunger": _info_value(info, "hunger"),
         "menu_open": _info_value(info, "menu_open"),
         "game_time_advanced": bool(_info_value(info, "game_time_advanced", True)),
-        "policy_feedback_length": len(feedback_history),
-        "policy_feedback": list(feedback_history),
+        "policy_context_length": len(context),
+        "policy_context": context_payload,
+        "policy_feedback_length": len(feedback_context),
+        "policy_feedback": feedback_context,
         "_next_observation": next_observation,
+    }
+    policy_history.append(
+        gameid=0,
+        observation_text=observation_text,
+        action_id=action_id,
+        feedback=_policy_feedback_from_result(result),
+    )
+    return result
+
+
+def _policy_feedback_from_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "action_id": int(result["action_id"]),
+        "reward": float(result.get("reward", 0.0) or 0.0),
+        "cumulative_reward": float(result.get("cumulative_reward", 0.0) or 0.0),
+        "message": str(result.get("message") or ""),
+        "hp": result.get("hp"),
+        "depth": result.get("depth"),
+        "game_time_advanced": bool(result.get("game_time_advanced", False)),
     }
 
 
-def _append_policy_feedback(
-    feedback_history: list[dict[str, Any]],
-    result: Mapping[str, Any],
-) -> None:
-    action_id = result.get("action_id")
-    if action_id is None:
-        return
-    feedback_history.append(
-        {
-            "action_id": int(action_id),
-            "reward": float(result.get("reward", 0.0) or 0.0),
-            "cumulative_reward": float(result.get("cumulative_reward", 0.0) or 0.0),
-            "message": str(result.get("message") or ""),
-            "hp": result.get("hp"),
-            "depth": result.get("depth"),
-            "game_time_advanced": bool(result.get("game_time_advanced", False)),
-        }
-    )
-    del feedback_history[:-MAX_POLICY_FEEDBACK_ITEMS]
+def _serialize_policy_context(context: Sequence[Any]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for item in context:
+        if isinstance(item, Mapping):
+            serialized.append(dict(item))
+            continue
+        observation_text, action_id = item
+        serialized.append(
+            {
+                "observation_text": str(observation_text),
+                "action_id": int(action_id),
+            }
+        )
+    return serialized
 
 
 def _reset_env(env: NetHackEnv, *, seed: int) -> dict[str, Any]:

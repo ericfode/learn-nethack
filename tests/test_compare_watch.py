@@ -61,15 +61,15 @@ class ScriptedPolicy:
     def __init__(self, preferred_action_id: int):
         self.preferred_action_id = preferred_action_id
         self.seen_candidate_sets: list[list[int]] = []
-        self.observation_texts: list[str] = []
+        self.user_prompts: list[str] = []
 
     def score_actions(
         self,
         *,
-        observation_text: str,
+        user_prompt: str,
         valid_action_ids: list[int],
     ) -> dict[int, float]:
-        self.observation_texts.append(observation_text)
+        self.user_prompts.append(user_prompt)
         self.seen_candidate_sets.append(list(valid_action_ids))
         return {
             action_id: (10.0 if action_id == self.preferred_action_id else 0.0)
@@ -288,8 +288,10 @@ class CompareWatchTests(unittest.TestCase):
 
     def test_policy_prompt_and_candidates_preserve_action_json_contract(self) -> None:
         messages = build_policy_messages(
-            observation_text="MAP:\n@.\nMESSAGE:\nhello",
-            valid_action_ids=[0, 1],
+            user_prompt=(
+                "Allowed action_ids: [0, 1]\n"
+                "Current observation:\nMAP:\n@.\nMESSAGE:\nhello"
+            ),
         )
 
         self.assertEqual(
@@ -299,6 +301,22 @@ class CompareWatchTests(unittest.TestCase):
         self.assertIn("Allowed action_ids: [0, 1]", messages[1]["content"])
         self.assertIn("Current observation:", messages[1]["content"])
         self.assertEqual(format_action_candidate(1), '{"action_id": 1}')
+
+    def test_model_watch_spec_rejects_invalid_context_contract(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown SFT context mode"):
+            ModelWatchSpec(
+                role="current",
+                model_name="model",
+                adapter_checkpoint=None,
+                context_mode="not-a-mode",
+            )
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            ModelWatchSpec(
+                role="current",
+                model_name="model",
+                adapter_checkpoint=None,
+                context_token_budget=0,
+            )
 
     def test_policy_feedback_history_renders_nle_outcomes(self) -> None:
         text = format_policy_feedback_history(
@@ -359,7 +377,7 @@ class CompareWatchTests(unittest.TestCase):
         policy = CountingBatchPolicy()
 
         scores = policy.score_actions(
-            observation_text="MAP:\n@",
+            user_prompt="Allowed action_ids: [0, 1, 2]\nCurrent observation:\nMAP:\n@",
             valid_action_ids=[0, 1, 2],
         )
 
@@ -372,7 +390,7 @@ class CompareWatchTests(unittest.TestCase):
         policy = CacheClearingPolicy()
 
         policy.score_actions(
-            observation_text="MAP:\n@",
+            user_prompt="Allowed action_ids: [0, 1]\nCurrent observation:\nMAP:\n@",
             valid_action_ids=[0, 1],
         )
 
@@ -497,11 +515,78 @@ class CompareWatchTests(unittest.TestCase):
             "current action 1",
             events[1]["current"]["policy_feedback"][0]["message"],
         )
-        self.assertNotIn("Recent action feedback:", current_policy.observation_texts[0])
-        self.assertIn("Recent action feedback:", current_policy.observation_texts[1])
-        self.assertIn("action_id=1", current_policy.observation_texts[1])
+        self.assertNotIn("Recent action feedback:", current_policy.user_prompts[0])
+        self.assertIn("Recent action feedback:", current_policy.user_prompts[1])
+        self.assertIn("action_id=1", current_policy.user_prompts[1])
         self.assertEqual(current_policy.seen_candidate_sets, [[0, 1], [0, 1]])
         self.assertEqual(baseline_policy.seen_candidate_sets, [[0, 1], [0, 1]])
+
+    def test_single_frame_rollout_never_injects_history(self) -> None:
+        with TemporaryDirectory() as tmp:
+            policy = ScriptedPolicy(preferred_action_id=1)
+            run_side_by_side_rollout(
+                run_id="single-frame-contract",
+                current_spec=ModelWatchSpec(
+                    role="current",
+                    model_name="model",
+                    adapter_checkpoint="adapter",
+                    context_mode="single_frame",
+                ),
+                baseline_spec=ModelWatchSpec(
+                    role="baseline",
+                    model_name="model",
+                    adapter_checkpoint=None,
+                    context_mode="single_frame",
+                ),
+                current_policy=policy,
+                baseline_policy=ScriptedPolicy(preferred_action_id=0),
+                current_env=FakeEnv("current"),
+                baseline_env=FakeEnv("baseline"),
+                action_manifest=_manifest(),
+                out_dir=Path(tmp),
+                seed=123,
+                max_steps=2,
+            )
+
+        self.assertEqual(len(policy.user_prompts), 2)
+        self.assertNotIn("Recent history:", policy.user_prompts[1])
+        self.assertNotIn("Recent action feedback:", policy.user_prompts[1])
+        self.assertTrue(policy.user_prompts[1].startswith("Allowed action_ids:"))
+
+    def test_growing_context_rollout_matches_sft_history_shape(self) -> None:
+        with TemporaryDirectory() as tmp:
+            policy = ScriptedPolicy(preferred_action_id=1)
+            run_side_by_side_rollout(
+                run_id="growing-context-contract",
+                current_spec=ModelWatchSpec(
+                    role="current",
+                    model_name="model",
+                    adapter_checkpoint="adapter",
+                    context_mode="growing_context",
+                    context_token_budget=512,
+                ),
+                baseline_spec=ModelWatchSpec(
+                    role="baseline",
+                    model_name="model",
+                    adapter_checkpoint=None,
+                    context_mode="growing_context",
+                    context_token_budget=512,
+                ),
+                current_policy=policy,
+                baseline_policy=ScriptedPolicy(preferred_action_id=0),
+                current_env=FakeEnv("current"),
+                baseline_env=FakeEnv("baseline"),
+                action_manifest=_manifest(),
+                out_dir=Path(tmp),
+                seed=123,
+                max_steps=2,
+            )
+
+        second_prompt = policy.user_prompts[1]
+        self.assertIn("Recent history:\n", second_prompt)
+        self.assertIn("Previous action_id: 1", second_prompt)
+        self.assertNotIn("Recent action feedback:", second_prompt)
+        self.assertIn("Current observation:\nMAP:", second_prompt)
 
     def test_parse_seed_list_rejects_empty_or_invalid_values(self) -> None:
         self.assertEqual(parse_seed_list("101, 202,303"), [101, 202, 303])

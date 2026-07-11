@@ -187,10 +187,10 @@ class AlwaysSouthPolicy:
     def score_actions(
         self,
         *,
-        observation_text: str,
+        user_prompt: str,
         valid_action_ids: list[int],
     ) -> dict[int, float]:
-        self.last_observation_text = observation_text
+        self.last_user_prompt = user_prompt
         return {
             action_id: (1.0 if action_id == 1 else 0.0)
             for action_id in valid_action_ids
@@ -1940,7 +1940,10 @@ class NldSftDataLoopTests(unittest.TestCase):
         self.assertEqual(metrics["parse_valid_rate"], 1.0)
         self.assertEqual(metrics["action_space_valid_rate"], 1.0)
         self.assertEqual(metrics["exact_match_rate"], 0.5)
-        self.assertEqual(policy.last_observation_text, "MAP:\n#@")
+        self.assertEqual(
+            policy.last_user_prompt,
+            "Current observation:\nMAP:\n#@",
+        )
         self.assertEqual(progress[-1]["phase"], "policy_candidate_scoring")
         self.assertEqual(progress[-1]["evaluated_rows"], 2)
 

@@ -907,6 +907,8 @@ def compare_watch(
     character: str = typer.Option(DEFAULT_NLE_CHARACTER, "--character"),
     seed: int = typer.Option(20260615, "--seed"),
     max_steps: int = typer.Option(80, "--max-steps"),
+    context_mode: str = typer.Option("feedback_context_6", "--context-mode"),
+    context_token_budget: int = typer.Option(2_048, "--context-token-budget"),
     device: str | None = typer.Option(None, "--device"),
     dry_run_contract: bool = typer.Option(
         False,
@@ -926,6 +928,8 @@ def compare_watch(
             character=character,
             seed=seed,
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
         )
     else:
         report = run_checkpoint_compare(
@@ -938,6 +942,8 @@ def compare_watch(
             character=character,
             seed=seed,
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
             device=device,
         )
     typer.echo(json.dumps(report, indent=2, sort_keys=True))
@@ -966,6 +972,8 @@ def compare_watch_sweep(
     env_id: str = typer.Option("NetHackChallenge-v0", "--env-id"),
     character: str = typer.Option(DEFAULT_NLE_CHARACTER, "--character"),
     max_steps: int = typer.Option(80, "--max-steps"),
+    context_mode: str = typer.Option("feedback_context_6", "--context-mode"),
+    context_token_budget: int = typer.Option(2_048, "--context-token-budget"),
     device: str | None = typer.Option(None, "--device"),
     dry_run_contract: bool = typer.Option(
         False,
@@ -985,6 +993,8 @@ def compare_watch_sweep(
             env_id=env_id,
             character=character,
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
         )
     else:
         report = run_checkpoint_compare_sweep(
@@ -997,6 +1007,8 @@ def compare_watch_sweep(
             env_id=env_id,
             character=character,
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
             device=device,
         )
     typer.echo(json.dumps(report, indent=2, sort_keys=True))

@@ -836,6 +836,8 @@ def local_watch_compare_contract(
     character: str = DEFAULT_NLE_CHARACTER,
     seed: int = 20260615,
     max_steps: int = 10,
+    context_mode: str = "feedback_context_6",
+    context_token_budget: int = 2_048,
     device: str | None = None,
 ) -> dict[str, Any]:
     """Return the Modal watch-compare contract before model execution."""
@@ -853,6 +855,8 @@ def local_watch_compare_contract(
             "character": character,
             "seed": seed,
             "max_steps": max_steps,
+            "context_mode": context_mode,
+            "context_token_budget": context_token_budget,
             "device": device,
         },
         "artifacts": {
@@ -879,6 +883,8 @@ def local_watch_compare_sweep_contract(
     character: str = DEFAULT_NLE_CHARACTER,
     seeds: str | Iterable[int] = "20260615,20260616,20260617",
     max_steps: int = 10,
+    context_mode: str = "feedback_context_6",
+    context_token_budget: int = 2_048,
     device: str | None = None,
 ) -> dict[str, Any]:
     """Return the Modal watch-sweep contract before model execution."""
@@ -903,6 +909,8 @@ def local_watch_compare_sweep_contract(
             "unique_character_count": len(set(character_values)),
             "seeds": seed_values,
             "max_steps": max_steps,
+            "context_mode": context_mode,
+            "context_token_budget": context_token_budget,
             "device": device,
         },
         "artifacts": {
@@ -2112,6 +2120,8 @@ def _watch_compare_impl(
     character: str = DEFAULT_NLE_CHARACTER,
     seed: int = 20260615,
     max_steps: int = 10,
+    context_mode: str = "feedback_context_6",
+    context_token_budget: int = 2_048,
     device: str | None = None,
     dry_run_contract: bool = False,
 ) -> dict[str, Any]:
@@ -2125,6 +2135,8 @@ def _watch_compare_impl(
         character=character,
         seed=seed,
         max_steps=max_steps,
+        context_mode=context_mode,
+        context_token_budget=context_token_budget,
         device=device,
     )
     contract_path = _write_json(contract["artifacts"]["contract"], contract)
@@ -2155,6 +2167,8 @@ def _watch_compare_impl(
             character=character,
             seed=seed,
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
             device=device,
             event_callback=event_callback,
         )
@@ -2287,6 +2301,8 @@ def _watch_compare_sweep_impl(
     character: str = DEFAULT_NLE_CHARACTER,
     seeds: str = "20260615,20260616,20260617",
     max_steps: int = 10,
+    context_mode: str = "feedback_context_6",
+    context_token_budget: int = 2_048,
     device: str | None = None,
     dry_run_contract: bool = False,
 ) -> dict[str, Any]:
@@ -2300,6 +2316,8 @@ def _watch_compare_sweep_impl(
         character=character,
         seeds=seeds,
         max_steps=max_steps,
+        context_mode=context_mode,
+        context_token_budget=context_token_budget,
         device=device,
     )
     contract_path = _write_json(contract["artifacts"]["contract"], contract)
@@ -2330,6 +2348,8 @@ def _watch_compare_sweep_impl(
             character=character,
             seeds=contract["watch"]["seeds"],
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
             device=device,
             event_callback=event_callback,
         )
@@ -2781,6 +2801,8 @@ if app is not None:
         character: str = DEFAULT_NLE_CHARACTER,
         seed: int = 20260615,
         max_steps: int = 10,
+        context_mode: str = "feedback_context_6",
+        context_token_budget: int = 2_048,
         device: str | None = None,
         dry_run_contract: bool = False,
     ) -> dict[str, Any]:
@@ -2794,6 +2816,8 @@ if app is not None:
             character=character,
             seed=seed,
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
             device=device,
             dry_run_contract=dry_run_contract,
         )
@@ -2817,6 +2841,8 @@ if app is not None:
         character: str = DEFAULT_NLE_CHARACTER,
         seeds: str = "20260615,20260616,20260617",
         max_steps: int = 10,
+        context_mode: str = "feedback_context_6",
+        context_token_budget: int = 2_048,
         device: str | None = None,
         dry_run_contract: bool = False,
     ) -> dict[str, Any]:
@@ -2830,6 +2856,8 @@ if app is not None:
             character=character,
             seeds=seeds,
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
             device=device,
             dry_run_contract=dry_run_contract,
         )
@@ -3055,6 +3083,8 @@ else:
         character: str = DEFAULT_NLE_CHARACTER,
         seed: int = 20260615,
         max_steps: int = 10,
+        context_mode: str = "feedback_context_6",
+        context_token_budget: int = 2_048,
         device: str | None = None,
         dry_run_contract: bool = True,
     ) -> dict[str, Any]:
@@ -3068,6 +3098,8 @@ else:
             character=character,
             seed=seed,
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
             device=device,
             dry_run_contract=dry_run_contract,
         )
@@ -3081,6 +3113,8 @@ else:
         character: str = DEFAULT_NLE_CHARACTER,
         seeds: str = "20260615,20260616,20260617",
         max_steps: int = 10,
+        context_mode: str = "feedback_context_6",
+        context_token_budget: int = 2_048,
         device: str | None = None,
         dry_run_contract: bool = True,
     ) -> dict[str, Any]:
@@ -3094,6 +3128,8 @@ else:
             character=character,
             seeds=seeds,
             max_steps=max_steps,
+            context_mode=context_mode,
+            context_token_budget=context_token_budget,
             device=device,
             dry_run_contract=dry_run_contract,
         )

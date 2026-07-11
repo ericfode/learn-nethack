@@ -18,6 +18,7 @@ from learn_nethack.compare_watch import (
     build_policy_messages,
     format_action_candidate,
 )
+from learn_nethack.sft_rows import build_policy_prompt
 
 
 PREFERENCE_ROW_SCHEMA_VERSION = "learn-nethack.policy-action-preference-row.v1"
@@ -59,8 +60,11 @@ def build_policy_action_preference_rows(
         if current_action == baseline_action:
             skipped["same_action"] += 1
             continue
-        current_prompt = _policy_prompt_text(current)
-        baseline_prompt = _policy_prompt_text(baseline)
+        current_prompt = _policy_prompt_text(current, valid_action_ids=valid_action_ids)
+        baseline_prompt = _policy_prompt_text(
+            baseline,
+            valid_action_ids=valid_action_ids,
+        )
         if current_prompt is None or baseline_prompt is None:
             skipped["missing_prompt"] += 1
             continue
@@ -106,10 +110,7 @@ def build_policy_action_preference_rows(
             {
                 "schema_version": PREFERENCE_ROW_SCHEMA_VERSION,
                 "task": "policy_action_preference",
-                "messages": build_policy_messages(
-                    observation_text=current_prompt,
-                    valid_action_ids=valid_action_ids,
-                ),
+                "messages": build_policy_messages(user_prompt=current_prompt),
                 "chosen": {
                     "role": "assistant",
                     "content": format_action_candidate(chosen_action),
@@ -341,11 +342,23 @@ def _valid_action_ids(watch_report: Mapping[str, Any]) -> list[int]:
     return action_ids
 
 
-def _policy_prompt_text(event_side: Mapping[str, Any]) -> str | None:
+def _policy_prompt_text(
+    event_side: Mapping[str, Any],
+    *,
+    valid_action_ids: Sequence[int],
+) -> str | None:
+    exact_prompt = event_side.get("policy_user_prompt")
+    if isinstance(exact_prompt, str) and exact_prompt:
+        return exact_prompt
     for key in ("policy_observation_text", "prompt_terminal_frame"):
         value = event_side.get(key)
         if isinstance(value, str) and value:
-            return value
+            return build_policy_prompt(
+                observation_text=value,
+                valid_action_ids=[int(action_id) for action_id in valid_action_ids],
+                history=[],
+                history_mode="single_frame",
+            )
     return None
 
 
@@ -455,7 +468,7 @@ def _event_status_text(event_side: Mapping[str, Any]) -> str:
 def _transition_visible_map_novelty_count(event_side: Mapping[str, Any]) -> int:
     prompt = event_side.get("prompt_terminal_frame")
     if not isinstance(prompt, str) or not prompt:
-        prompt = _policy_prompt_text(event_side)
+        prompt = event_side.get("policy_observation_text")
     terminal = event_side.get("terminal_frame")
     if not isinstance(prompt, str) or not isinstance(terminal, str):
         return 0

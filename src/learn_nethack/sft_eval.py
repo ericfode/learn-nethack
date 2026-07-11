@@ -390,7 +390,7 @@ def evaluate_policy_rows_with_policy(
             int(value) for value in row_metadata["valid_action_ids"]
         ]
         scores = policy.score_actions(
-            observation_text=_policy_observation_text(row),
+            user_prompt=_policy_user_prompt(row),
             valid_action_ids=row_valid_action_ids,
         )
         predictions.append(
@@ -847,8 +847,14 @@ def evaluate_next_frame_rows_with_scorer(
     }
 
 
-def _policy_observation_text(row: dict[str, Any]) -> str:
-    return _current_observation_text(row)
+def _policy_user_prompt(row: dict[str, Any]) -> str:
+    messages = row.get("messages") or []
+    user_messages = [
+        str(message.get("content", ""))
+        for message in messages
+        if message.get("role") == "user"
+    ]
+    return user_messages[-1] if user_messages else ""
 
 
 def _current_observation_text(row: dict[str, Any]) -> str:
