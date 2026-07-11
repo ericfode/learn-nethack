@@ -104,17 +104,22 @@ awkward. Patch the current owner unless a clean ownership split is necessary.
 
 The corrected proof lane uses:
 
-- environment: `NetHackChallenge-v0`;
-- action manifest: the exact 121-action manifest for that environment;
+- training/action authority: `NetHackChallenge-v0` and its exact 121-action
+  manifest;
+- paired live evaluator: the explicitly named
+  `NetHackPairedChallenge-v0`, which preserves NLE Challenge actions, reward,
+  termination, prompts, and no-progress behavior while restoring NLE seed
+  control so baseline and checkpoint start from identical states;
 - primary model: `google/gemma-4-E4b-it`;
 - policy output: exactly `{"action_id": <int>}`;
 - live objective: `live_rollout_utility_v7`;
 - proof seeds: at least the 16 fixed seeds in `modal_config.py`;
 - external targets: `benchmarks/nethack_benchmarks.json`.
 
-Changing the environment, action space, model size, fitness version, or seed
-set starts a new comparison family. It requires new matched base and current-20k
-baselines. Do not silently migrate an existing run.
+Do not report `NetHackPairedChallenge-v0` as the official unseeded Challenge
+environment. Changing its behavior, action space, model size, fitness version,
+or seed set starts a new comparison family. It requires new matched base and
+current-20k baselines. Do not silently migrate an existing run.
 
 Treat NLE as the environment authority. Before a rollout, require the manifest
 environment ID and exact action IDs to match `env.unwrapped.actions`. Candidate

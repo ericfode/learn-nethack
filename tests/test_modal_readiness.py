@@ -276,7 +276,7 @@ class ModalReadinessTests(unittest.TestCase):
             "modal run src/learn_nethack/modal_train.py::watch_compare "
             "--run-id watch-10 "
             "--action-manifest /datasets/action_manifest.json "
-            "--env-id NetHackChallenge-v0 "
+            "--env-id NetHackPairedChallenge-v0 "
             "--model-name google/gemma-4-E4b-it "
             "--max-steps 10",
         )
@@ -411,7 +411,7 @@ class ModalReadinessTests(unittest.TestCase):
             commands["watch_compare_score_damage"],
         )
         self.assertIn(
-            "--env-id NetHackChallenge-v0",
+            "--env-id NetHackPairedChallenge-v0",
             commands["watch_compare_score_damage"],
         )
         self.assertIn(

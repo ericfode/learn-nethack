@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Mapping, MutableMapping
 
+from learn_nethack.paired_nle import PAIRED_CHALLENGE_ENV_ID
+
 
 MODAL_APP_NAME = "learn-nethack-gemma"
 MODAL_SECRET_NAMES = ("hf-token", "wandb-secret")
@@ -14,7 +16,7 @@ PYTHON_VERSION = "3.11"
 MODAL_SOURCE_MODULES = ("learn_nethack",)
 HF_CACHE_MOUNT_PATH = "/cache/huggingface"
 DEFAULT_NEXT_FRAME_MAX_NEW_TOKENS = 512
-DEFAULT_WATCH_ENV_ID = "NetHackChallenge-v0"
+DEFAULT_WATCH_ENV_ID = PAIRED_CHALLENGE_ENV_ID
 DEFAULT_WATCH_MODEL_NAME = "google/gemma-4-E4b-it"
 DEFAULT_WATCH_ACTION_MANIFEST = "/datasets/action_manifest.json"
 DEFAULT_WATCH_PROOF_SEEDS = (

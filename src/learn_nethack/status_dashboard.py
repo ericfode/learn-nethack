@@ -381,7 +381,7 @@ def _build_todo_items(
             "label": "Run 16-seed live watch proof",
             "status": "pending",
             "detail": (
-                f"Must use {FITNESS_OBJECTIVE_VERSION} and NetHackChallenge-v0."
+                f"Must use {FITNESS_OBJECTIVE_VERSION} and NetHackPairedChallenge-v0."
             ),
         },
         {

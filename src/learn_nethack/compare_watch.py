@@ -11,6 +11,11 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from learn_nethack.action_manifest import ActionManifest, load_action_manifest
 from learn_nethack.observations import render_observation_text
+from learn_nethack.paired_nle import (
+    action_manifest_env_id_for,
+    make_paired_challenge_env,
+    PAIRED_CHALLENGE_ENV_ID,
+)
 from learn_nethack import policy_feedback
 from learn_nethack.sft_rows import POLICY_SYSTEM_PROMPT
 from learn_nethack.ttyrec import write_terminal_ttyrec
@@ -88,10 +93,12 @@ def validate_action_manifest_env_id(
     env_id: str,
 ) -> None:
     """Require the action manifest to name the environment being evaluated."""
-    if action_manifest.env_id != env_id:
+    expected_manifest_env_id = action_manifest_env_id_for(env_id)
+    if action_manifest.env_id != expected_manifest_env_id:
         raise ValueError(
             "action manifest environment mismatch: "
-            f"manifest={action_manifest.env_id!r}, requested={env_id!r}"
+            f"manifest={action_manifest.env_id!r}, "
+            f"expected={expected_manifest_env_id!r}, requested={env_id!r}"
         )
 
 
@@ -522,6 +529,8 @@ def make_nle_env(
     character: str = DEFAULT_NLE_CHARACTER,
 ) -> NetHackEnv:
     """Create an NLE environment without making NLE a package import dependency."""
+    if env_id == PAIRED_CHALLENGE_ENV_ID:
+        return make_paired_challenge_env(character=character)
     try:
         import nle  # noqa: F401
         import gymnasium as gym

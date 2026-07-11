@@ -231,6 +231,10 @@ class CompareWatchTests(unittest.TestCase):
         )
 
     def test_action_manifest_rejects_environment_id_mismatch(self) -> None:
+        validate_action_manifest_env_id(
+            _manifest(),
+            env_id="NetHackPairedChallenge-v0",
+        )
         with self.assertRaisesRegex(ValueError, "environment mismatch"):
             validate_action_manifest_env_id(
                 _manifest(),
