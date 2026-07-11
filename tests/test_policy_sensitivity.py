@@ -72,10 +72,12 @@ def test_state_sensitivity_reports_accuracy_drop_and_prediction_change() -> None
         _row(step=2, frame="STATE_B", action_id=1),
     ]
 
+    progress: list[dict] = []
     report = evaluate_policy_state_sensitivity(
         rows=rows,
         policy=FramePolicy(),
         seed=7,
+        progress_callback=progress.append,
     )
 
     assert report["case_count"] == 2
@@ -84,6 +86,11 @@ def test_state_sensitivity_reports_accuracy_drop_and_prediction_change() -> None
     assert report["current_state_dependence_gap"] == 1.0
     assert report["prediction_change_rate_after_current_shuffle"] == 1.0
     assert report["skipped_group_count"] == 0
+    assert progress[-1] == {
+        "phase": "policy_state_sensitivity",
+        "evaluated_cases": 2,
+        "max_cases": 2,
+    }
 
 
 def test_shuffle_skips_groups_without_distinct_action_labels() -> None:
@@ -100,4 +107,3 @@ def test_shuffle_skips_groups_without_distinct_action_labels() -> None:
 
     assert report["case_count"] == 0
     assert report["skipped_group_count"] == 1
-

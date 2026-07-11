@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import random
-from typing import Any
+from typing import Any, Callable
 
 from learn_nethack.compare_watch import select_action_id
 
@@ -88,6 +88,7 @@ def evaluate_policy_state_sensitivity(
     policy: Any,
     seed: int,
     max_rows: int | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     selected_rows = list(rows[:max_rows] if max_rows is not None else rows)
     cases = build_current_frame_shuffle_cases(selected_rows, seed=seed)
@@ -95,7 +96,7 @@ def evaluate_policy_state_sensitivity(
     shuffled_matches = 0
     prediction_changes = 0
     samples: list[dict[str, Any]] = []
-    for case in cases:
+    for case_index, case in enumerate(cases, start=1):
         natural_prediction = _predict_action(
             policy=policy,
             user_prompt=case.natural_user_prompt,
@@ -119,6 +120,16 @@ def evaluate_policy_state_sensitivity(
                     "shuffled_prediction_action_id": shuffled_prediction,
                     "shuffled_from_episode_id": case.shuffled_from_episode_id,
                     "shuffled_from_step": case.shuffled_from_step,
+                }
+            )
+        if progress_callback is not None and (
+            case_index == 1 or case_index % 8 == 0 or case_index == len(cases)
+        ):
+            progress_callback(
+                {
+                    "phase": "policy_state_sensitivity",
+                    "evaluated_cases": case_index,
+                    "max_cases": len(cases),
                 }
             )
 

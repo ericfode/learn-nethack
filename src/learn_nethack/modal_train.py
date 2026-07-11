@@ -1702,6 +1702,7 @@ def _should_commit_sft_eval_progress(progress: Mapping[str, Any]) -> bool:
         ("evaluated_rows", "max_rows"),
         ("evaluated_windows", "max_windows"),
         ("evaluated_frames", "max_frames"),
+        ("evaluated_cases", "max_cases"),
     ):
         evaluated = progress.get(evaluated_key)
         maximum = progress.get(maximum_key)
@@ -1965,6 +1966,7 @@ def _sft_eval_impl(
                 role=model_role,
                 model_name=model_name,
                 adapter_checkpoint=adapter,
+                candidate_batch_size=121,
             ),
             device=device,
         )
@@ -1983,6 +1985,7 @@ def _sft_eval_impl(
                 policy=policy,
                 seed=seed,
                 max_rows=max_rows,
+                progress_callback=eval_progress_callback,
             )
             for key in (
                 "natural_exact_match_rate",
