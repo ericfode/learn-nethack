@@ -221,7 +221,7 @@ class StatusDashboardTests(unittest.TestCase):
             snapshot["goal_status"]["build_activity"],
             "withheld_by_proof_gate",
         )
-        self.assertIn("Full-corpus scaling is withheld", html)
+        self.assertIn("failed state-contingent control", html)
 
     def test_goal_status_marks_incomplete_build_stalled_without_matching_task(
         self,

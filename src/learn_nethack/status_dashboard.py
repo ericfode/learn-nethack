@@ -311,9 +311,9 @@ def _goal_status(
             ),
             "tone": "bad",
             "reason": (
-                "Offline imitation improved, but paired live rollouts collapsed "
-                "and made no score, reward, or depth progress. Full-corpus scaling "
-                "is withheld."
+                "Offline imitation improved, but paired live rollouts failed "
+                "state-contingent control and made no score, reward, or depth "
+                "progress. Full-corpus scaling is withheld."
                 if live_control_failed
                 else "The latest corrected proof gate did not pass."
             ),
@@ -410,7 +410,7 @@ def _build_todo_items(
             {
                 "label": "Paired live smoke gate",
                 "status": "failed",
-                "detail": "Single-frame collapsed to SEARCH; growing-context collapsed to Escape; both made zero progress.",
+                "detail": "Single-frame collapsed to SEARCH; growing-context replayed the same action sequence across roles; both made zero progress.",
             },
             {
                 "label": "Correct live distribution shift",
