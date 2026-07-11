@@ -63,6 +63,7 @@ from learn_nethack.sft_eval import (
     evaluate_policy_rows_with_policy,
     summarize_next_frame_sequence_rows,
 )
+from learn_nethack.policy_sensitivity import evaluate_policy_state_sensitivity
 from learn_nethack.sft_integrity import (
     SFT_INTEGRITY_SCHEMA_VERSION,
     audit_sft_dataset,
@@ -651,6 +652,7 @@ def local_sft_eval_contract(
     next_frame_generate_max_rows: int = 64,
     next_frame_sequence_horizons: str = "1,5,10",
     next_frame_sequence_max_windows: int = 64,
+    policy_sensitivity: bool = False,
 ) -> dict[str, Any]:
     """Return the Modal SFT eval contract for baseline or trained scoring."""
     db = _none_if_empty(db)
@@ -695,6 +697,15 @@ def local_sft_eval_contract(
                 "dominant_action_collapse",
             ]
         )
+        if policy_sensitivity:
+            required_metrics.extend(
+                [
+                    "policy_sensitivity_current_state_dependence_gap",
+                    "policy_sensitivity_prediction_change_rate_after_current_shuffle",
+                ]
+            )
+    elif policy_sensitivity:
+        raise ValueError("policy_sensitivity requires the policy_action eval task")
     if "next_frame" in task_names:
         required_metrics.extend(
             [
@@ -766,6 +777,7 @@ def local_sft_eval_contract(
         },
         "evaluation": {
             "tasks": list(task_names),
+            "policy_sensitivity": policy_sensitivity,
             "next_frame_eval_mode": frame_eval_mode,
             "next_frame_max_new_tokens": next_frame_max_new_tokens,
             "next_frame_generate_max_rows": next_frame_generate_max_rows,
@@ -778,6 +790,9 @@ def local_sft_eval_contract(
             "report": str(Path(layout["root"]) / "reports" / "sft_eval_report.json"),
             "progress": str(
                 Path(layout["root"]) / "reports" / "sft_eval_progress.jsonl"
+            ),
+            "policy_sensitivity": str(
+                Path(layout["root"]) / "reports" / "policy_sensitivity.json"
             ),
             "contract": str(
                 Path(layout["root"]) / "reports" / "sft_eval_contract.json"
@@ -1765,6 +1780,7 @@ def _sft_eval_impl(
     next_frame_generate_max_rows: int = 64,
     next_frame_sequence_horizons: str = "1,5,10",
     next_frame_sequence_max_windows: int = 64,
+    policy_sensitivity: bool = False,
     dry_run_contract: bool = False,
 ) -> dict[str, Any]:
     normalize_hf_token_env(os.environ)
@@ -1791,6 +1807,7 @@ def _sft_eval_impl(
         next_frame_generate_max_rows=next_frame_generate_max_rows,
         next_frame_sequence_horizons=next_frame_sequence_horizons,
         next_frame_sequence_max_windows=next_frame_sequence_max_windows,
+        policy_sensitivity=policy_sensitivity,
     )
     contract_path = _write_json(contract["artifacts"]["contract"], contract)
     if dry_run_contract:
@@ -1935,6 +1952,7 @@ def _sft_eval_impl(
         build_result_payload = build_result.__dict__
     hf_cache_committed_after_policy_load = False
     policy_metrics: dict[str, float] = {}
+    policy_sensitivity_report: dict[str, Any] | None = None
     eval_progress_callback = _modal_sft_eval_progress_logger(
         run_id=run_id,
         label_source=eval_label_source,
@@ -1959,6 +1977,26 @@ def _sft_eval_impl(
             max_rows=max_rows,
             progress_callback=eval_progress_callback,
         )
+        if contract["evaluation"]["policy_sensitivity"]:
+            policy_sensitivity_report = evaluate_policy_state_sensitivity(
+                rows=policy_rows,
+                policy=policy,
+                seed=seed,
+                max_rows=max_rows,
+            )
+            for key in (
+                "natural_exact_match_rate",
+                "shuffled_current_exact_match_rate",
+                "current_state_dependence_gap",
+                "prediction_change_rate_after_current_shuffle",
+            ):
+                policy_metrics[f"policy_sensitivity_{key}"] = float(
+                    policy_sensitivity_report[key]
+                )
+            _write_json(
+                contract["artifacts"]["policy_sensitivity"],
+                policy_sensitivity_report,
+            )
     hf_cache_committed_after_dynamics_load = False
     next_frame_metrics: dict[str, float] = {}
     next_frame_generated_samples: list[dict[str, Any]] = []
@@ -2052,6 +2090,7 @@ def _sft_eval_impl(
         "model": contract["model"],
         "build_result": build_result_payload,
         "metrics": metrics,
+        "policy_sensitivity": policy_sensitivity_report,
         "next_frame_generated_samples": next_frame_generated_samples,
         "hf_cache": {
             "mount_path": HF_CACHE_MOUNT_PATH,
@@ -2067,6 +2106,8 @@ def _sft_eval_impl(
     artifact = wandb.Artifact(name=f"sft-eval-{run_id}", type="evaluation")
     artifact.add_file(str(metrics_path))
     artifact.add_file(str(report_path))
+    if policy_sensitivity_report is not None:
+        artifact.add_file(str(contract["artifacts"]["policy_sensitivity"]))
     if policy_rows_path.exists():
         artifact.add_file(str(policy_rows_path))
     if next_frame_rows_path.exists():
@@ -2752,6 +2793,7 @@ if app is not None:
         next_frame_generate_max_rows: int = 64,
         next_frame_sequence_horizons: str = "1,5,10",
         next_frame_sequence_max_windows: int = 64,
+        policy_sensitivity: bool = False,
         dry_run_contract: bool = False,
     ) -> dict[str, Any]:
         """Run or contract-check baseline/trained SFT evaluation."""
@@ -2779,6 +2821,7 @@ if app is not None:
             next_frame_generate_max_rows=next_frame_generate_max_rows,
             next_frame_sequence_horizons=next_frame_sequence_horizons,
             next_frame_sequence_max_windows=next_frame_sequence_max_windows,
+            policy_sensitivity=policy_sensitivity,
             dry_run_contract=dry_run_contract,
         )
 
@@ -3044,6 +3087,7 @@ else:
         next_frame_generate_max_rows: int = 64,
         next_frame_sequence_horizons: str = "1,5,10",
         next_frame_sequence_max_windows: int = 64,
+        policy_sensitivity: bool = False,
         dry_run_contract: bool = True,
     ) -> dict[str, Any]:
         """Local fallback returns the durable eval contract."""
@@ -3071,6 +3115,7 @@ else:
             next_frame_generate_max_rows=next_frame_generate_max_rows,
             next_frame_sequence_horizons=next_frame_sequence_horizons,
             next_frame_sequence_max_windows=next_frame_sequence_max_windows,
+            policy_sensitivity=policy_sensitivity,
             dry_run_contract=dry_run_contract,
         )
 

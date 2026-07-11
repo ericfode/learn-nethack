@@ -26,6 +26,7 @@ from learn_nethack.compare_watch import (
     parse_seed_list,
     run_side_by_side_rollout,
     run_side_by_side_rollout_sweep,
+    summarize_action_sequence_similarity,
     seed_nle_env,
     select_action_id,
     summarize_rollout_events,
@@ -606,6 +607,33 @@ class CompareWatchTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "at least one seed"):
             parse_seed_list(" , ")
+
+    def test_action_sequence_similarity_detects_cross_episode_replay(self) -> None:
+        repeated = summarize_action_sequence_similarity(
+            [[38, 38, 20], [38, 38, 20], [38, 38, 20], [38, 38, 20]]
+        )
+        distinct = summarize_action_sequence_similarity([[1, 2], [2, 1]])
+
+        self.assertEqual(
+            repeated["cross_episode_action_sequence_pair_count"],
+            6,
+        )
+        self.assertEqual(
+            repeated["cross_episode_action_sequence_identity_rate"],
+            1.0,
+        )
+        self.assertEqual(
+            repeated["cross_episode_action_sequence_hamming_similarity"],
+            1.0,
+        )
+        self.assertEqual(
+            distinct["cross_episode_action_sequence_identity_rate"],
+            0.0,
+        )
+        self.assertEqual(
+            distinct["cross_episode_action_sequence_hamming_similarity"],
+            0.0,
+        )
         with self.assertRaisesRegex(ValueError, "invalid seed"):
             parse_seed_list("101,nope")
 

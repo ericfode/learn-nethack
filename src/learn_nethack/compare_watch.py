@@ -864,6 +864,11 @@ def summarize_rollout_events(
         for event in side_events
         if event.get("action_id") is not None
     )
+    action_sequence = [
+        int(event["action_id"])
+        for event in side_events
+        if event.get("action_id") is not None
+    ]
     step_count = sum(1 for event in side_events if event.get("action_id") is not None)
     message_counts = Counter(str(event.get("message") or "") for event in side_events)
     wall_message_count = sum(1 for event in side_events if _is_wall_event(event))
@@ -966,6 +971,7 @@ def summarize_rollout_events(
         "depth_max": depth_max,
         "depth_delta": depth_delta,
         "action_histogram": dict(sorted(action_counts.items())),
+        "action_sequence": action_sequence,
         "action_mode_count": action_mode_count,
         "action_repeat_rate": action_repeat_rate,
         "action_collapse_excess": action_collapse_excess,
@@ -1229,12 +1235,55 @@ def _aggregate_sweep_rollout_metrics(
         dict(metrics.get("baseline") or {}) for metrics in rollout_metrics
     ]
     delta_metrics = [dict(metrics.get("deltas") or {}) for metrics in rollout_metrics]
+    current_aggregate = _mean_numeric_metrics(current_metrics)
+    current_aggregate.update(
+        summarize_action_sequence_similarity(
+            [metrics.get("action_sequence") or [] for metrics in current_metrics]
+        )
+    )
+    baseline_aggregate = _mean_numeric_metrics(baseline_metrics)
+    baseline_aggregate.update(
+        summarize_action_sequence_similarity(
+            [metrics.get("action_sequence") or [] for metrics in baseline_metrics]
+        )
+    )
     return {
         "aggregation": "mean_over_seed_reports",
         "seed_count": len(seed_reports),
-        "current": _mean_numeric_metrics(current_metrics),
-        "baseline": _mean_numeric_metrics(baseline_metrics),
+        "current": current_aggregate,
+        "baseline": baseline_aggregate,
         "deltas": _mean_numeric_metrics(delta_metrics),
+    }
+
+
+def summarize_action_sequence_similarity(
+    sequences: Sequence[Sequence[int]],
+) -> dict[str, float | int]:
+    """Measure whether independent episodes replay the same action sequence."""
+    pair_count = 0
+    identical_count = 0
+    hamming_similarities: list[float] = []
+    normalized = [tuple(int(action_id) for action_id in sequence) for sequence in sequences]
+    for left_index, left in enumerate(normalized):
+        for right in normalized[left_index + 1 :]:
+            pair_count += 1
+            identical_count += int(left == right)
+            denominator = max(len(left), len(right))
+            matches = sum(
+                int(left[index] == right[index])
+                for index in range(min(len(left), len(right)))
+            )
+            hamming_similarities.append(matches / denominator if denominator else 1.0)
+    return {
+        "cross_episode_action_sequence_pair_count": pair_count,
+        "cross_episode_action_sequence_identity_rate": (
+            identical_count / pair_count if pair_count else 0.0
+        ),
+        "cross_episode_action_sequence_hamming_similarity": (
+            sum(hamming_similarities) / len(hamming_similarities)
+            if hamming_similarities
+            else 0.0
+        ),
     }
 
 

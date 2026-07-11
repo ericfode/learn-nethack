@@ -1415,11 +1415,17 @@ class ModalReadinessTests(unittest.TestCase):
             nle_root="/datasets/nld/nld-aa-taster/unpacked/nld-aa-taster/nle_data",
             eval_tasks="policy_action",
             next_frame_max_new_tokens=128,
+            policy_sensitivity=True,
         )
 
         self.assertEqual(contract["evaluation"]["tasks"], ["policy_action"])
         self.assertEqual(contract["evaluation"]["next_frame_max_new_tokens"], 128)
         self.assertIn("exact_match_rate", contract["required_metrics"])
+        self.assertTrue(contract["evaluation"]["policy_sensitivity"])
+        self.assertIn(
+            "policy_sensitivity_current_state_dependence_gap",
+            contract["required_metrics"],
+        )
         self.assertNotIn("next_frame_char_accuracy", contract["required_metrics"])
 
     def test_local_sft_eval_contract_can_request_generated_frame_metrics(
