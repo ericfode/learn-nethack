@@ -542,7 +542,7 @@ def _collect_watch_demos(artifacts: Path) -> list[dict[str, Any]]:
                     "report_path": str(report_path),
                     "demo_path": str(demo_path),
                     "demo_label": (
-                        demo_path.parent.name
+                        f"{demo_path.parent.parent.name} / {demo_path.parent.name}"
                         if demo_path.parent.name.startswith("seed-")
                         else run_id
                     ),
