@@ -33,6 +33,7 @@ from learn_nethack.modal_config import (
     run_artifact_layout,
 )
 from learn_nethack.action_manifest import load_action_manifest
+from learn_nethack.existing_sft_eval import load_existing_sft_eval_dataset
 from learn_nethack.nld_archive import (
     iter_archive_dataset_batches,
     plan_archive_dataset,
@@ -630,6 +631,7 @@ def local_sft_eval_contract(
     run_id: str,
     db: str | None,
     action_manifest: str,
+    dataset_dir: str | None = None,
     nle_root: str | None = None,
     archive_manifest: str | None = None,
     split: str = "validation",
@@ -651,13 +653,21 @@ def local_sft_eval_contract(
 ) -> dict[str, Any]:
     """Return the Modal SFT eval contract for baseline or trained scoring."""
     db = _none_if_empty(db)
+    dataset_dir = _none_if_empty(dataset_dir)
     nle_root = _none_if_empty(nle_root)
     archive_manifest = _none_if_empty(archive_manifest)
-    dataset_source = _resolve_dataset_source(
-        db=db,
-        nle_root=nle_root,
-        archive_manifest=archive_manifest,
-    )
+    if dataset_dir is not None:
+        if db is not None or nle_root is not None or archive_manifest is not None:
+            raise ValueError(
+                "dataset_dir cannot be combined with db, nle_root, or archive_manifest"
+            )
+        dataset_source = "existing_sft_jsonl"
+    else:
+        dataset_source = _resolve_dataset_source(
+            db=db,
+            nle_root=nle_root,
+            archive_manifest=archive_manifest,
+        )
     task_names = _parse_task_names(eval_tasks)
     normalized_label_source = _parse_training_label_source(
         label_source=label_source,
@@ -730,6 +740,7 @@ def local_sft_eval_contract(
         },
         "dataset": {
             "source": dataset_source,
+            "dataset_dir": dataset_dir,
             "db": db,
             "nle_root": nle_root,
             "archive_manifest": archive_manifest,
@@ -1693,6 +1704,7 @@ def _sft_eval_impl(
     run_id: str,
     db: str | None,
     action_manifest: str,
+    dataset_dir: str | None = None,
     nle_root: str | None = None,
     archive_manifest: str | None = None,
     split: str = "validation",
@@ -1719,6 +1731,7 @@ def _sft_eval_impl(
         run_id=run_id,
         db=db,
         action_manifest=action_manifest,
+        dataset_dir=dataset_dir,
         nle_root=nle_root,
         archive_manifest=archive_manifest,
         split=split,
@@ -1747,83 +1760,138 @@ def _sft_eval_impl(
         }
 
     wandb_mode = resolve_wandb_mode(os.environ)
-    manifest = load_action_manifest(action_manifest)
-    source = _decoded_batch_source(
-        db=db,
-        nle_root=nle_root,
-        archive_manifest=archive_manifest,
-        batch_size=batch_size,
-        seq_length=seq_length,
-        staged_db_path=Path(contract["artifacts"]["root"]) / "staged_ttyrecs.db",
-    )
-    splits = split_gameids(source.gameids, seed=seed)
-    split_gameids_by_name = {
-        "train": splits.train,
-        "validation": splits.validation,
-        "test": splits.test,
-    }
-    if split not in split_gameids_by_name:
-        raise ValueError(f"unknown eval split: {split}")
-    selected_gameids = split_gameids_by_name[split]
-    if not selected_gameids:
-        raise RuntimeError(f"eval split {split!r} has no gameids")
+    import wandb
 
-    eval_data_dir = Path(contract["artifacts"]["root"]) / "eval-data"
-    split_sets = {
-        "train": set[int](),
-        "validation": set[int](),
-        "test": set[int](),
-    }
-    split_sets[split] = set(selected_gameids)
-    batches = source.iter_batches(selected_gameids)
+    run = wandb.init(
+        project="learn-nethack",
+        name=run_id,
+        job_type="sft-eval",
+        mode=wandb_mode.mode,
+        config=contract,
+        dir=contract["artifacts"]["wandb"],
+    )
+    wandb_report = _wandb_run_report(run, wandb_mode.mode)
+    _write_json(
+        contract["artifacts"]["report"],
+        {
+            "schema_version": "learn-nethack.sft-eval-report.v1",
+            "run_id": run_id,
+            "status": "running",
+            "contract_path": str(contract_path),
+            "wandb_mode": wandb_mode.mode,
+            "wandb": wandb_report,
+        },
+    )
+    _commit_mounted_volume("/runs")
+    manifest = load_action_manifest(action_manifest)
     task_names = tuple(contract["evaluation"]["tasks"])
     eval_label_source = str(contract["dataset"]["label_source"])
-    if eval_label_source == "pseudo_visible_player_delta":
-        transitions = (
-            transition
-            for batch in batches
-            for transition in normalize_frame_only_batch(batch)
-        )
-        build_result = write_pseudo_label_policy_dataset(
-            dataset_name=source.dataset_name,
-            mode=mode,
-            transitions=transitions,
-            action_manifest=manifest,
-            game_metadata_by_id=source.game_metadata_by_id,
-            splits=split_sets,
-            out_dir=eval_data_dir,
-            max_rows=max_rows,
+    if contract["dataset"]["source"] == "existing_sft_jsonl":
+        existing_dataset = load_existing_sft_eval_dataset(
+            dataset_dir=str(contract["dataset"]["dataset_dir"]),
+            split=split,
             tasks=task_names,
+            mode=mode,
+            action_manifest=manifest,
         )
+        selected_gameids = existing_dataset.gameids
+        policy_rows_path = existing_dataset.policy_rows_path
+        next_frame_rows_path = existing_dataset.next_frame_rows_path
+        policy_rows = existing_dataset.policy_rows
+        next_frame_rows = existing_dataset.next_frame_rows
+        dataset_runtime = {
+            "effective_db": None,
+            "dataset_name": existing_dataset.dataset_name,
+            "db_copy_report": None,
+            "archive_manifest": None,
+            "archive_shard_count": 0,
+            "integrity_report": existing_dataset.integrity_report,
+        }
+        build_result_payload = None
     else:
-        transitions = (
-            transition
-            for batch in batches
-            for transition in normalize_decoded_batch(batch)
+        source = _decoded_batch_source(
+            db=db,
+            nle_root=nle_root,
+            archive_manifest=archive_manifest,
+            batch_size=batch_size,
+            seq_length=seq_length,
+            staged_db_path=Path(contract["artifacts"]["root"]) / "staged_ttyrecs.db",
         )
-        build_result = write_sft_dataset(
-            dataset_name=source.dataset_name,
-            mode=mode,
-            transitions=transitions,
-            action_manifest=manifest,
-            game_metadata_by_id=source.game_metadata_by_id,
-            splits=split_sets,
-            out_dir=eval_data_dir,
-            max_rows=max_rows,
-            tasks=task_names,
+        splits = split_gameids(source.gameids, seed=seed)
+        split_gameids_by_name = {
+            "train": splits.train,
+            "validation": splits.validation,
+            "test": splits.test,
+        }
+        if split not in split_gameids_by_name:
+            raise ValueError(f"unknown eval split: {split}")
+        selected_gameids = split_gameids_by_name[split]
+        if not selected_gameids:
+            raise RuntimeError(f"eval split {split!r} has no gameids")
+
+        eval_data_dir = Path(contract["artifacts"]["root"]) / "eval-data"
+        split_sets = {
+            "train": set[int](),
+            "validation": set[int](),
+            "test": set[int](),
+        }
+        split_sets[split] = set(selected_gameids)
+        batches = source.iter_batches(selected_gameids)
+        if eval_label_source == "pseudo_visible_player_delta":
+            transitions = (
+                transition
+                for batch in batches
+                for transition in normalize_frame_only_batch(batch)
+            )
+            build_result = write_pseudo_label_policy_dataset(
+                dataset_name=source.dataset_name,
+                mode=mode,
+                transitions=transitions,
+                action_manifest=manifest,
+                game_metadata_by_id=source.game_metadata_by_id,
+                splits=split_sets,
+                out_dir=eval_data_dir,
+                max_rows=max_rows,
+                tasks=task_names,
+            )
+        else:
+            transitions = (
+                transition
+                for batch in batches
+                for transition in normalize_decoded_batch(batch)
+            )
+            build_result = write_sft_dataset(
+                dataset_name=source.dataset_name,
+                mode=mode,
+                transitions=transitions,
+                action_manifest=manifest,
+                game_metadata_by_id=source.game_metadata_by_id,
+                splits=split_sets,
+                out_dir=eval_data_dir,
+                max_rows=max_rows,
+                tasks=task_names,
+            )
+        policy_rows_path = eval_data_dir / f"{split}.policy_action.jsonl"
+        next_frame_rows_path = eval_data_dir / f"{split}.next_frame.jsonl"
+        policy_rows = (
+            load_jsonl_rows([policy_rows_path])
+            if "policy_action" in task_names and policy_rows_path.exists()
+            else []
         )
-    policy_rows_path = eval_data_dir / f"{split}.policy_action.jsonl"
-    next_frame_rows_path = eval_data_dir / f"{split}.next_frame.jsonl"
-    policy_rows = (
-        load_jsonl_rows([policy_rows_path])
-        if "policy_action" in task_names and policy_rows_path.exists()
-        else []
-    )
-    next_frame_rows = (
-        load_jsonl_rows([next_frame_rows_path])
-        if "next_frame" in task_names and next_frame_rows_path.exists()
-        else []
-    )
+        next_frame_rows = (
+            load_jsonl_rows([next_frame_rows_path])
+            if "next_frame" in task_names and next_frame_rows_path.exists()
+            else []
+        )
+        dataset_runtime = {
+            "effective_db": source.effective_db,
+            "dataset_name": source.dataset_name,
+            "db_copy_report": source.db_copy_report,
+            "archive_manifest": source.archive_manifest,
+            "archive_shard_count": source.archive_shard_count,
+            "integrity_report": None,
+        }
+        build_result_payload = build_result.__dict__
     hf_cache_committed_after_policy_load = False
     policy_metrics: dict[str, float] = {}
     if "policy_action" in task_names:
@@ -1919,14 +1987,15 @@ def _sft_eval_impl(
         "status": "completed",
         "contract_path": str(contract_path),
         "metrics_path": str(metrics_path),
-        "db_copy_report": source.db_copy_report,
-        "archive_manifest": source.archive_manifest,
-        "archive_shard_count": source.archive_shard_count,
+        "db_copy_report": dataset_runtime["db_copy_report"],
+        "archive_manifest": dataset_runtime["archive_manifest"],
+        "archive_shard_count": dataset_runtime["archive_shard_count"],
         "wandb_mode": wandb_mode.mode,
         "dataset": {
             "source": contract["dataset"]["source"],
-            "db": source.effective_db,
-            "dataset_name": source.dataset_name,
+            "db": dataset_runtime["effective_db"],
+            "dataset_dir": contract["dataset"]["dataset_dir"],
+            "dataset_name": dataset_runtime["dataset_name"],
             "split": split,
             "selected_gameids": len(selected_gameids),
             "policy_rows_path": str(policy_rows_path) if policy_rows else None,
@@ -1935,10 +2004,11 @@ def _sft_eval_impl(
             ),
             "max_rows": max_rows,
             "label_source": eval_label_source,
+            "integrity_report": dataset_runtime["integrity_report"],
         },
         "evaluation": contract["evaluation"],
         "model": contract["model"],
-        "build_result": build_result.__dict__,
+        "build_result": build_result_payload,
         "metrics": metrics,
         "next_frame_generated_samples": next_frame_generated_samples,
         "hf_cache": {
@@ -1949,17 +2019,7 @@ def _sft_eval_impl(
     }
     report_path = _write_json(contract["artifacts"]["report"], report)
 
-    import wandb
-
-    run = wandb.init(
-        project="learn-nethack",
-        name=run_id,
-        job_type="sft-eval",
-        mode=wandb_mode.mode,
-        config=report,
-        dir=contract["artifacts"]["wandb"],
-    )
-    report["wandb"] = _wandb_run_report(run, wandb_mode.mode)
+    report["wandb"] = wandb_report
     report_path = _write_json(contract["artifacts"]["report"], report)
     run.log({f"sft_eval/{key}": value for key, value in sorted(metrics.items())})
     artifact = wandb.Artifact(name=f"sft-eval-{run_id}", type="evaluation")
@@ -1971,6 +2031,7 @@ def _sft_eval_impl(
         artifact.add_file(str(next_frame_rows_path))
     run.log_artifact(artifact)
     run.finish()
+    _commit_mounted_volume("/runs")
     return {**report, "report_path": str(report_path)}
 
 
@@ -2576,6 +2637,7 @@ if app is not None:
     def sft_eval(
         run_id: str,
         action_manifest: str,
+        dataset_dir: str | None = None,
         db: str | None = None,
         nle_root: str | None = None,
         archive_manifest: str | None = None,
@@ -2603,6 +2665,7 @@ if app is not None:
             run_id=run_id,
             db=db,
             action_manifest=action_manifest,
+            dataset_dir=dataset_dir,
             nle_root=nle_root,
             archive_manifest=archive_manifest,
             split=split,
@@ -2858,6 +2921,7 @@ else:
     def sft_eval(
         run_id: str,
         action_manifest: str,
+        dataset_dir: str | None = None,
         db: str | None = None,
         nle_root: str | None = None,
         archive_manifest: str | None = None,
@@ -2885,6 +2949,7 @@ else:
             run_id=run_id,
             db=db,
             action_manifest=action_manifest,
+            dataset_dir=dataset_dir,
             nle_root=nle_root,
             archive_manifest=archive_manifest,
             split=split,

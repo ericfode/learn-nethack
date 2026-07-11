@@ -355,6 +355,14 @@ class ModalReadinessTests(unittest.TestCase):
             commands["eval_baseline_policy_and_next_frame"],
         )
         self.assertIn(
+            "--dataset-dir /runs/full-build/sft-data",
+            commands["eval_baseline_policy_and_next_frame"],
+        )
+        self.assertNotIn(
+            "--archive-manifest",
+            commands["eval_baseline_policy_and_next_frame"],
+        )
+        self.assertIn(
             "--next-frame-eval-mode both",
             commands["eval_baseline_policy_and_next_frame"],
         )
@@ -1526,6 +1534,34 @@ class ModalReadinessTests(unittest.TestCase):
             "next_frame_teacher_forced_mean_nll",
             contract["required_metrics"],
         )
+
+    def test_local_sft_eval_contract_supports_exact_existing_dataset(self) -> None:
+        modal_train = importlib.import_module("learn_nethack.modal_train")
+
+        contract = modal_train.local_sft_eval_contract(
+            run_id="corrected-validation",
+            db=None,
+            action_manifest="/datasets/action_manifest.json",
+            dataset_dir="/datasets/corrected-20k",
+            split="validation",
+        )
+
+        self.assertEqual(contract["dataset"]["source"], "existing_sft_jsonl")
+        self.assertEqual(
+            contract["dataset"]["dataset_dir"],
+            "/datasets/corrected-20k",
+        )
+
+    def test_local_sft_eval_contract_rejects_ambiguous_existing_source(self) -> None:
+        modal_train = importlib.import_module("learn_nethack.modal_train")
+
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            modal_train.local_sft_eval_contract(
+                run_id="ambiguous-validation",
+                db="/datasets/ttyrecs.db",
+                action_manifest="/datasets/action_manifest.json",
+                dataset_dir="/datasets/corrected-20k",
+            )
 
     def test_local_watch_compare_contract_names_modal_artifacts(self) -> None:
         modal_train = importlib.import_module("learn_nethack.modal_train")
