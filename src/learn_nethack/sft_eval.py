@@ -405,7 +405,11 @@ def evaluate_policy_rows_with_policy(
         metadata.append(row_metadata)
         valid_action_ids.update(row_valid_action_ids)
         evaluated += 1
-        if progress_callback is not None:
+        if progress_callback is not None and (
+            evaluated == 1
+            or evaluated % 8 == 0
+            or (max_rows is not None and evaluated >= max_rows)
+        ):
             progress_callback(
                 {
                     "phase": "policy_candidate_scoring",
@@ -531,6 +535,13 @@ def evaluate_next_frame_sequences_with_predictor(
         rows=rows,
         horizons=horizons,
     )
+    metrics.update(
+        evaluate_copy_current_sequences(
+            rows=rows,
+            horizons=horizons,
+            max_windows=max_windows,
+        )
+    )
     for horizon in horizons:
         if horizon <= 0:
             raise ValueError(f"next-frame sequence horizon must be positive: {horizon}")
@@ -640,6 +651,58 @@ def evaluate_next_frame_sequences_with_predictor(
             counts=parse_failure_counts,
             total=len(labels),
         )
+        metrics[f"{prefix}_exact_match_rate"] = frame_metrics[
+            "next_frame_exact_match_rate"
+        ]
+        metrics[f"{prefix}_char_accuracy"] = frame_metrics["next_frame_char_accuracy"]
+        metrics[f"{prefix}_map_line_exact_rate"] = frame_metrics[
+            "next_frame_map_line_exact_rate"
+        ]
+        metrics[f"{prefix}_message_exact_rate"] = frame_metrics[
+            "next_frame_message_exact_rate"
+        ]
+        for suffix in CHANGED_STATE_METRIC_SUFFIXES:
+            metrics[f"{prefix}_{suffix}"] = frame_metrics[f"next_frame_{suffix}"]
+    return metrics
+
+
+def evaluate_copy_current_sequences(
+    *,
+    rows: list[dict[str, Any]],
+    horizons: tuple[int, ...] = (1, 5, 10),
+    max_windows: int | None = None,
+) -> dict[str, float]:
+    """Score an autoregressive predictor that repeats each window's first frame."""
+    sequence_rows = _episode_next_frame_rows(rows)
+    metrics: dict[str, float] = {}
+    for horizon in horizons:
+        if horizon <= 0:
+            raise ValueError(f"next-frame sequence horizon must be positive: {horizon}")
+        predictions: list[str] = []
+        labels: list[str] = []
+        ground_truth_current_frames: list[str] = []
+        windows = 0
+        for episode_rows in sequence_rows:
+            for start in range(0, len(episode_rows) - horizon + 1):
+                if max_windows is not None and windows >= max_windows:
+                    break
+                copied_frame = _current_observation_text(episode_rows[start])
+                for row in episode_rows[start : start + horizon]:
+                    predictions.append(copied_frame)
+                    labels.append(_next_frame_label(row))
+                    ground_truth_current_frames.append(_current_observation_text(row))
+                windows += 1
+            if max_windows is not None and windows >= max_windows:
+                break
+
+        frame_metrics = compute_next_frame_metrics(
+            predictions=predictions,
+            labels=labels,
+            current_frames=ground_truth_current_frames,
+        )
+        prefix = f"copy_current_next_{horizon}_frame_sequence"
+        metrics[f"{prefix}_window_count"] = float(windows)
+        metrics[f"{prefix}_frame_count"] = float(len(labels))
         metrics[f"{prefix}_exact_match_rate"] = frame_metrics[
             "next_frame_exact_match_rate"
         ]

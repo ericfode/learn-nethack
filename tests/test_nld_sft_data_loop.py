@@ -41,6 +41,7 @@ from learn_nethack.sft_eval import (
     build_training_proof_gate_report,
     compute_next_frame_metrics,
     compute_policy_metrics,
+    evaluate_copy_current_sequences,
     evaluate_next_frame_rows_with_scorer,
     evaluate_next_frame_sequences_with_predictor,
     evaluate_next_frame_rows_with_predictor,
@@ -1931,6 +1932,7 @@ class NldSftDataLoopTests(unittest.TestCase):
         metrics = evaluate_policy_rows_with_policy(
             rows=rows,
             policy=policy,
+            max_rows=2,
             progress_callback=progress.append,
         )
 
@@ -2264,6 +2266,18 @@ class NldSftDataLoopTests(unittest.TestCase):
         self.assertEqual(metrics["next_2_frame_sequence_frame_count"], 4.0)
         self.assertEqual(metrics["next_2_frame_sequence_parse_valid_rate"], 1.0)
         self.assertEqual(metrics["next_2_frame_sequence_exact_match_rate"], 1.0)
+        self.assertEqual(
+            metrics["copy_current_next_2_frame_sequence_window_count"],
+            2.0,
+        )
+        self.assertEqual(
+            metrics["copy_current_next_2_frame_sequence_frame_count"],
+            4.0,
+        )
+        self.assertEqual(
+            metrics["copy_current_next_2_frame_sequence_exact_match_rate"],
+            0.0,
+        )
         self.assertTrue(samples)
         self.assertEqual(samples[0]["phase"], "next_frame_sequence")
         self.assertEqual(samples[0]["horizon"], 1)
@@ -2279,6 +2293,16 @@ class NldSftDataLoopTests(unittest.TestCase):
         self.assertIn(
             "next_frame_sequence_frame",
             {event["phase"] for event in progress_events},
+        )
+
+        bounded_copy = evaluate_copy_current_sequences(
+            rows=rows,
+            horizons=(2,),
+            max_windows=1,
+        )
+        self.assertEqual(
+            bounded_copy["copy_current_next_2_frame_sequence_window_count"],
+            1.0,
         )
 
     def test_summarize_next_frame_sequence_rows_respects_episode_step_gaps(

@@ -735,6 +735,8 @@ def local_sft_eval_contract(
                         f"next_{horizon}_frame_sequence_frame_count",
                         f"next_{horizon}_frame_sequence_char_accuracy",
                         f"next_{horizon}_frame_sequence_exact_match_rate",
+                        f"copy_current_next_{horizon}_frame_sequence_char_accuracy",
+                        f"copy_current_next_{horizon}_frame_sequence_changed_map_cell_f1",
                     ]
                 )
     layout = run_artifact_layout(run_id)
