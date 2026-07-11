@@ -1927,13 +1927,20 @@ class NldSftDataLoopTests(unittest.TestCase):
             },
         ]
 
-        metrics = evaluate_policy_rows_with_policy(rows=rows, policy=policy)
+        progress: list[dict[str, object]] = []
+        metrics = evaluate_policy_rows_with_policy(
+            rows=rows,
+            policy=policy,
+            progress_callback=progress.append,
+        )
 
         self.assertEqual(metrics["row_count"], 2.0)
         self.assertEqual(metrics["parse_valid_rate"], 1.0)
         self.assertEqual(metrics["action_space_valid_rate"], 1.0)
         self.assertEqual(metrics["exact_match_rate"], 0.5)
         self.assertEqual(policy.last_observation_text, "MAP:\n#@")
+        self.assertEqual(progress[-1]["phase"], "policy_candidate_scoring")
+        self.assertEqual(progress[-1]["evaluated_rows"], 2)
 
     def test_evaluate_next_frame_rows_scores_model_generated_frames(self) -> None:
         predictor = EchoNextFramePredictor()

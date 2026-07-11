@@ -1552,6 +1552,25 @@ class ModalReadinessTests(unittest.TestCase):
             "/datasets/corrected-20k",
         )
 
+    def test_sft_eval_progress_commits_periodically_and_at_completion(self) -> None:
+        modal_train = importlib.import_module("learn_nethack.modal_train")
+
+        self.assertFalse(
+            modal_train._should_commit_sft_eval_progress(
+                {"evaluated_rows": 1, "max_rows": 64}
+            )
+        )
+        self.assertTrue(
+            modal_train._should_commit_sft_eval_progress(
+                {"evaluated_rows": 32, "max_rows": 64}
+            )
+        )
+        self.assertTrue(
+            modal_train._should_commit_sft_eval_progress(
+                {"evaluated_rows": 63, "max_rows": 63}
+            )
+        )
+
     def test_local_sft_eval_contract_rejects_ambiguous_existing_source(self) -> None:
         modal_train = importlib.import_module("learn_nethack.modal_train")
 

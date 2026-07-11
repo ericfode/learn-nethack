@@ -372,6 +372,7 @@ def evaluate_policy_rows_with_policy(
     rows: list[dict[str, Any]],
     policy: Any,
     max_rows: int | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, float]:
     """Score policy SFT rows through constrained candidate-action selection."""
     predictions: list[dict[str, int]] = []
@@ -404,6 +405,14 @@ def evaluate_policy_rows_with_policy(
         metadata.append(row_metadata)
         valid_action_ids.update(row_valid_action_ids)
         evaluated += 1
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "policy_candidate_scoring",
+                    "evaluated_rows": evaluated,
+                    "max_rows": max_rows,
+                }
+            )
 
     return compute_policy_metrics(
         predictions=predictions,

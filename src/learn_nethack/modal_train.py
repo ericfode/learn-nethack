@@ -1659,10 +1659,26 @@ def _modal_sft_build_progress_logger(
             with progress_path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
             mount_path = _modal_volume_mount_for_path(progress_path)
-            if mount_path is not None:
+            if mount_path is not None and _should_commit_sft_eval_progress(progress):
                 _commit_mounted_volume(mount_path)
 
     return _log
+
+
+def _should_commit_sft_eval_progress(progress: Mapping[str, Any]) -> bool:
+    for evaluated_key, maximum_key in (
+        ("evaluated_rows", "max_rows"),
+        ("evaluated_windows", "max_windows"),
+        ("evaluated_frames", "max_frames"),
+    ):
+        evaluated = progress.get(evaluated_key)
+        maximum = progress.get(maximum_key)
+        if not isinstance(evaluated, int) or evaluated <= 0:
+            continue
+        return evaluated % 32 == 0 or (
+            isinstance(maximum, int) and evaluated >= maximum
+        )
+    return False
 
 
 def _modal_volume_mount_for_path(path: Path) -> str | None:
@@ -1902,6 +1918,12 @@ def _sft_eval_impl(
         build_result_payload = build_result.__dict__
     hf_cache_committed_after_policy_load = False
     policy_metrics: dict[str, float] = {}
+    eval_progress_callback = _modal_sft_eval_progress_logger(
+        run_id=run_id,
+        label_source=eval_label_source,
+        tasks=task_names,
+        progress_path=Path(contract["artifacts"]["progress"]),
+    )
     if "policy_action" in task_names:
         policy = TransformerCandidatePolicy(
             ModelWatchSpec(
@@ -1918,6 +1940,7 @@ def _sft_eval_impl(
             rows=policy_rows,
             policy=policy,
             max_rows=max_rows,
+            progress_callback=eval_progress_callback,
         )
     hf_cache_committed_after_dynamics_load = False
     next_frame_metrics: dict[str, float] = {}
@@ -1933,12 +1956,6 @@ def _sft_eval_impl(
                 rows=next_frame_rows,
                 horizons=sequence_horizons,
             )
-        )
-        eval_progress_callback = _modal_sft_eval_progress_logger(
-            run_id=run_id,
-            label_source=eval_label_source,
-            tasks=task_names,
-            progress_path=Path(contract["artifacts"]["progress"]),
         )
         eval_sample_callback = _bounded_sample_collector(
             next_frame_generated_samples,
