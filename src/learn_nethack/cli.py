@@ -42,6 +42,7 @@ from learn_nethack.modal_config import (
     DEFAULT_NEXT_FRAME_MAX_NEW_TOKENS,
     DEFAULT_WATCH_ACTION_MANIFEST,
     DEFAULT_WATCH_ENV_ID,
+    DEFAULT_WATCH_PROOF_CHARACTERS,
     DEFAULT_WATCH_PROOF_SEEDS,
     sft_existing_dataset_followup_commands,
 )
@@ -755,9 +756,9 @@ def full_build_followup(
         help="NLE env id for deterministic live watch proof.",
     ),
     watch_character: str = typer.Option(
-        "mon-hum-neu-mal",
+        DEFAULT_WATCH_PROOF_CHARACTERS,
         "--watch-character",
-        help="Fixed character for deterministic live watch proof.",
+        help="One character or a comma-separated character per watch seed.",
     ),
     watch_seeds: str = typer.Option(
         DEFAULT_WATCH_PROOF_SEEDS,

@@ -22,6 +22,7 @@ from learn_nethack.compare_watch import (
     format_policy_feedback_history,
     format_action_candidate,
     make_nle_env,
+    parse_character_list,
     parse_seed_list,
     run_side_by_side_rollout,
     run_side_by_side_rollout_sweep,
@@ -507,6 +508,21 @@ class CompareWatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid seed"):
             parse_seed_list("101,nope")
 
+    def test_parse_character_list_broadcasts_or_requires_one_per_seed(self) -> None:
+        self.assertEqual(
+            parse_character_list("mon-hum-neu-mal", episode_count=2),
+            ["mon-hum-neu-mal", "mon-hum-neu-mal"],
+        )
+        self.assertEqual(
+            parse_character_list("arc-hum-law-mal,wiz-elf-cha-mal", episode_count=2),
+            ["arc-hum-law-mal", "wiz-elf-cha-mal"],
+        )
+        with self.assertRaisesRegex(ValueError, "match the seed count"):
+            parse_character_list(
+                "arc-hum-law-mal,mon-hum-neu-mal,wiz-elf-cha-mal",
+                episode_count=2,
+            )
+
     def test_side_by_side_sweep_reuses_policies_and_writes_aggregate_report(
         self,
     ) -> None:
@@ -529,12 +545,13 @@ class CompareWatchTests(unittest.TestCase):
                 ),
                 current_policy=current_policy,
                 baseline_policy=baseline_policy,
-                make_current_env=lambda: FakeEnv("shared"),
-                make_baseline_env=lambda: FakeEnv("shared"),
+                make_current_env=lambda _character: FakeEnv("shared"),
+                make_baseline_env=lambda _character: FakeEnv("shared"),
                 action_manifest=_manifest(),
                 out_dir=out_dir,
                 seeds=[101, 202],
                 max_steps=2,
+                characters="arc-hum-law-mal,wiz-elf-cha-mal",
             )
 
             report_path = out_dir / "sweep_report.json"
@@ -547,6 +564,11 @@ class CompareWatchTests(unittest.TestCase):
                 "learn-nethack.compare-watch-sweep-report.v1",
             )
             self.assertEqual(report["seed_count"], 2)
+            self.assertEqual(report["unique_character_count"], 2)
+            self.assertEqual(
+                [item["character"] for item in report["seed_reports"]],
+                ["arc-hum-law-mal", "wiz-elf-cha-mal"],
+            )
             self.assertEqual(report["paired_initial_state_equal_count"], 2)
             self.assertEqual(report["total_event_count"], 4)
             self.assertEqual(

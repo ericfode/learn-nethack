@@ -415,7 +415,7 @@ class ModalReadinessTests(unittest.TestCase):
             commands["watch_compare_score_damage"],
         )
         self.assertIn(
-            "--character mon-hum-neu-mal",
+            f"--character {config.DEFAULT_WATCH_PROOF_CHARACTERS}",
             commands["watch_compare_score_damage"],
         )
         self.assertIn(
@@ -1633,6 +1633,11 @@ class ModalReadinessTests(unittest.TestCase):
         self.assertEqual(contract["run_id"], "watch-sweep")
         self.assertEqual(contract["watch"]["seeds"], [101, 202])
         self.assertEqual(contract["watch"]["env_id"], "NetHack-v0")
+        self.assertEqual(
+            contract["watch"]["characters"],
+            ["mon-hum-neu-mal", "mon-hum-neu-mal"],
+        )
+        self.assertEqual(contract["watch"]["unique_character_count"], 1)
         self.assertEqual(contract["watch"]["max_steps"], 10)
         self.assertEqual(
             contract["artifacts"]["watch_dir"],

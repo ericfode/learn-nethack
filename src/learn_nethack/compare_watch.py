@@ -150,6 +150,30 @@ def parse_seed_list(seeds: str | Sequence[int]) -> list[int]:
     return parsed
 
 
+def parse_character_list(
+    characters: str | Sequence[str],
+    *,
+    episode_count: int,
+) -> list[str]:
+    """Parse one character per episode, broadcasting a single character."""
+    if episode_count <= 0:
+        raise ValueError("episode_count must be positive")
+    if isinstance(characters, str):
+        values = [part.strip() for part in characters.split(",") if part.strip()]
+    else:
+        values = [str(value).strip() for value in characters if str(value).strip()]
+    if not values:
+        raise ValueError("at least one character is required")
+    if len(values) == 1:
+        return values * episode_count
+    if len(values) != episode_count:
+        raise ValueError(
+            "character count must be one or match the seed count: "
+            f"characters={len(values)}, seeds={episode_count}"
+        )
+    return values
+
+
 def format_action_candidate(action_id: int) -> str:
     """Return the exact policy JSON candidate scored by the harness."""
     return f'{{"action_id": {int(action_id)}}}'
@@ -421,6 +445,7 @@ def run_checkpoint_compare(
             out_dir=out_dir,
             seed=seed,
             max_steps=max_steps,
+            character=character,
         )
     finally:
         current_env.close()
@@ -443,7 +468,12 @@ def run_checkpoint_compare_sweep(
     """Run a multi-seed checkpoint comparison while reusing loaded policies."""
     manifest = load_action_manifest(action_manifest_path)
     validate_action_manifest_env_id(manifest, env_id=env_id)
-    probe_env = make_nle_env(env_id, character=character)
+    seed_values = parse_seed_list(seeds)
+    character_values = parse_character_list(
+        character,
+        episode_count=len(seed_values),
+    )
+    probe_env = make_nle_env(env_id, character=character_values[0])
     try:
         validate_action_manifest_for_env(
             manifest,
@@ -452,7 +482,6 @@ def run_checkpoint_compare_sweep(
         )
     finally:
         probe_env.close()
-    seed_values = parse_seed_list(seeds)
     current_spec = ModelWatchSpec(
         role="current",
         model_name=model_name,
@@ -469,12 +498,17 @@ def run_checkpoint_compare_sweep(
         baseline_spec=baseline_spec,
         current_policy=TransformerCandidatePolicy(current_spec, device=device),
         baseline_policy=TransformerCandidatePolicy(baseline_spec, device=device),
-        make_current_env=lambda: make_nle_env(env_id, character=character),
-        make_baseline_env=lambda: make_nle_env(env_id, character=character),
+        make_current_env=lambda episode_character: make_nle_env(
+            env_id, character=episode_character
+        ),
+        make_baseline_env=lambda episode_character: make_nle_env(
+            env_id, character=episode_character
+        ),
         action_manifest=manifest,
         out_dir=out_dir,
         seeds=seed_values,
         max_steps=max_steps,
+        characters=character_values,
     )
 
 
@@ -511,6 +545,7 @@ def run_side_by_side_rollout(
     out_dir: str | Path,
     seed: int,
     max_steps: int,
+    character: str | None = None,
 ) -> dict[str, Any]:
     """Run paired rollouts and write JSONL events, report, and static viewer."""
     target = Path(out_dir)
@@ -585,6 +620,7 @@ def run_side_by_side_rollout(
                 "run_id": run_id,
                 "step": step_index,
                 "seed": seed,
+                "character": character,
                 "current": current_result,
                 "baseline": baseline_result,
             }
@@ -611,6 +647,7 @@ def run_side_by_side_rollout(
         "schema_version": COMPARE_REPORT_SCHEMA_VERSION,
         "run_id": run_id,
         "seed": seed,
+        "character": character,
         "max_steps": max_steps,
         "event_count": len(events),
         "current": asdict(current_spec),
@@ -669,22 +706,27 @@ def run_side_by_side_rollout_sweep(
     baseline_spec: ModelWatchSpec,
     current_policy: ActionScoringPolicy,
     baseline_policy: ActionScoringPolicy,
-    make_current_env: Callable[[], NetHackEnv],
-    make_baseline_env: Callable[[], NetHackEnv],
+    make_current_env: Callable[[str], NetHackEnv],
+    make_baseline_env: Callable[[str], NetHackEnv],
     action_manifest: ActionManifest,
     out_dir: str | Path,
     seeds: Sequence[int],
     max_steps: int,
+    characters: str | Sequence[str] = DEFAULT_NLE_CHARACTER,
 ) -> dict[str, Any]:
     """Run paired rollouts across seeds and write an aggregate report."""
     seed_values = parse_seed_list(seeds)
+    character_values = parse_character_list(
+        characters,
+        episode_count=len(seed_values),
+    )
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
     seed_reports: list[dict[str, Any]] = []
-    for seed in seed_values:
+    for seed, character in zip(seed_values, character_values):
         seed_dir = target / f"seed-{seed}"
-        current_env = make_current_env()
-        baseline_env = make_baseline_env()
+        current_env = make_current_env(character)
+        baseline_env = make_baseline_env(character)
         try:
             seed_report = run_side_by_side_rollout(
                 run_id=f"{run_id}-seed-{seed}",
@@ -698,6 +740,7 @@ def run_side_by_side_rollout_sweep(
                 out_dir=seed_dir,
                 seed=seed,
                 max_steps=max_steps,
+                character=character,
             )
         finally:
             current_env.close()
@@ -708,6 +751,8 @@ def run_side_by_side_rollout_sweep(
         "schema_version": COMPARE_SWEEP_REPORT_SCHEMA_VERSION,
         "run_id": run_id,
         "seeds": seed_values,
+        "characters": character_values,
+        "unique_character_count": len(set(character_values)),
         "seed_count": len(seed_values),
         "max_steps": max_steps,
         "current": asdict(current_spec),
@@ -1116,6 +1161,7 @@ def _sweep_seed_report_summary(
 ) -> dict[str, Any]:
     return {
         "seed": int(report["seed"]),
+        "character": report.get("character"),
         "run_id": str(report["run_id"]),
         "event_count": int(report.get("event_count", 0) or 0),
         "deterministic_nle_seed": bool(report.get("deterministic_nle_seed", False)),
@@ -1268,6 +1314,10 @@ def write_compare_watch_sweep_contract(
     manifest = load_action_manifest(action_manifest_path)
     validate_action_manifest_env_id(manifest, env_id=env_id)
     seed_values = parse_seed_list(seeds)
+    character_values = parse_character_list(
+        character,
+        episode_count=len(seed_values),
+    )
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
     contract = {
@@ -1275,6 +1325,8 @@ def write_compare_watch_sweep_contract(
         "run_id": run_id,
         "env_id": env_id,
         "character": character,
+        "characters": character_values,
+        "unique_character_count": len(set(character_values)),
         "seeds": seed_values,
         "max_steps": max_steps,
         "current": asdict(

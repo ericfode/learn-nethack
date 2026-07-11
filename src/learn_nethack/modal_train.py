@@ -89,6 +89,7 @@ from learn_nethack.compare_watch import (
     DEFAULT_NLE_CHARACTER,
     ModelWatchSpec,
     TransformerCandidatePolicy,
+    parse_character_list,
     parse_seed_list,
     run_checkpoint_compare,
     run_checkpoint_compare_sweep,
@@ -884,6 +885,10 @@ def local_watch_compare_sweep_contract(
     layout = run_artifact_layout(run_id)
     watch_dir = layout["watch"]
     seed_values = parse_seed_list(list(seeds) if not isinstance(seeds, str) else seeds)
+    character_values = parse_character_list(
+        character,
+        episode_count=len(seed_values),
+    )
     return {
         "schema_version": "learn-nethack.watch-compare-sweep-contract.v1",
         "run_id": run_id,
@@ -894,6 +899,8 @@ def local_watch_compare_sweep_contract(
             "model_name": model_name,
             "env_id": env_id,
             "character": character,
+            "characters": character_values,
+            "unique_character_count": len(set(character_values)),
             "seeds": seed_values,
             "max_steps": max_steps,
             "device": device,
@@ -2759,7 +2766,7 @@ if app is not None:
         gpu=DEFAULT_GPU,
         volumes=volumes,
         secrets=secrets,
-        timeout=2 * 60 * 60,
+        timeout=6 * 60 * 60,
     )
     def watch_compare_sweep(
         run_id: str,

@@ -23,6 +23,12 @@ DEFAULT_WATCH_PROOF_SEEDS = (
     "20260623,20260624,20260625,20260626,"
     "20260627,20260628,20260629,20260630"
 )
+DEFAULT_WATCH_PROOF_CHARACTERS = (
+    "arc-hum-law-mal,bar-orc-cha-mal,cav-dwa-law-mal,hea-hum-neu-fem,"
+    "kni-hum-law-mal,mon-hum-neu-mal,pri-hum-law-fem,ran-elf-cha-fem,"
+    "rog-hum-cha-mal,sam-hum-law-mal,tou-hum-neu-fem,val-dwa-law-fem,"
+    "wiz-elf-cha-mal,arc-hum-law-mal,mon-hum-neu-mal,wiz-elf-cha-mal"
+)
 
 
 @dataclass(frozen=True)
@@ -388,7 +394,7 @@ def sft_existing_dataset_followup_commands(
     watch_run_id: str | None = None,
     watch_action_manifest: str = DEFAULT_WATCH_ACTION_MANIFEST,
     watch_env_id: str = DEFAULT_WATCH_ENV_ID,
-    watch_character: str = "mon-hum-neu-mal",
+    watch_character: str = DEFAULT_WATCH_PROOF_CHARACTERS,
     watch_seeds: str = DEFAULT_WATCH_PROOF_SEEDS,
     watch_max_steps: int = 80,
     runs_volume: str = "learn-nethack-runs",
