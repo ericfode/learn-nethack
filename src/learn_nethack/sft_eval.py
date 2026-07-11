@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from collections import defaultdict
+from collections import Counter, defaultdict
 from difflib import SequenceMatcher
 from itertools import zip_longest
 import json
@@ -62,6 +62,9 @@ def compute_policy_metrics(
     exact = 0
     role_totals: defaultdict[str, int] = defaultdict(int)
     role_exact: defaultdict[str, int] = defaultdict(int)
+    prediction_counts: Counter[int] = Counter()
+    target_counts: Counter[int] = Counter()
+    target_exact: Counter[int] = Counter()
 
     for prediction, label, row_metadata in zip(predictions, labels, metadata):
         action_id = None
@@ -72,22 +75,67 @@ def compute_policy_metrics(
             action_id = int(prediction["action_id"])
         if action_id in valid_action_ids:
             action_space_valid += 1
+            prediction_counts[int(action_id)] += 1
+        target_counts[int(label)] += 1
         if action_id == int(label):
             exact += 1
+            target_exact[int(label)] += 1
         role = str(row_metadata.get("role") or "unknown")
         role_totals[role] += 1
         if action_id == int(label):
             role_exact[role] += 1
 
+    predicted_dominant_action_id, predicted_dominant_count = _dominant_counter_item(
+        prediction_counts
+    )
+    target_dominant_action_id, _target_dominant_count = _dominant_counter_item(
+        target_counts
+    )
+    non_modal_total = sum(
+        count
+        for action_id, count in target_counts.items()
+        if action_id != target_dominant_action_id
+    )
+    non_modal_exact = sum(
+        count
+        for action_id, count in target_exact.items()
+        if action_id != target_dominant_action_id
+    )
+    per_action_accuracy = [
+        _rate(target_exact[action_id], count)
+        for action_id, count in target_counts.items()
+    ]
+    predicted_dominant_action_rate = _rate(predicted_dominant_count, row_count)
     metrics = {
         "row_count": float(row_count),
         "parse_valid_rate": _rate(parse_valid, row_count),
         "action_space_valid_rate": _rate(action_space_valid, row_count),
         "exact_match_rate": _rate(exact, row_count),
+        "macro_action_accuracy": (
+            sum(per_action_accuracy) / len(per_action_accuracy)
+            if per_action_accuracy
+            else 0.0
+        ),
+        "non_modal_action_exact_match_rate": _rate(
+            non_modal_exact,
+            non_modal_total,
+        ),
+        "predicted_unique_action_count": float(len(prediction_counts)),
+        "predicted_dominant_action_id": float(predicted_dominant_action_id),
+        "predicted_dominant_action_rate": predicted_dominant_action_rate,
+        "target_unique_action_count": float(len(target_counts)),
+        "target_dominant_action_id": float(target_dominant_action_id),
+        "dominant_action_collapse": float(predicted_dominant_action_rate > 0.50),
     }
     for role, total in sorted(role_totals.items()):
         metrics[f"role_exact_match/{role}"] = _rate(role_exact[role], total)
     return metrics
+
+
+def _dominant_counter_item(counter: Counter[int]) -> tuple[int, int]:
+    if not counter:
+        return -1, 0
+    return min(counter.items(), key=lambda item: (-item[1], item[0]))
 
 
 def compute_next_frame_metrics(

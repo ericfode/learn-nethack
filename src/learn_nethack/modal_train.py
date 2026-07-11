@@ -684,7 +684,15 @@ def local_sft_eval_contract(
     required_metrics = []
     if "policy_action" in task_names:
         required_metrics.extend(
-            ["parse_valid_rate", "action_space_valid_rate", "exact_match_rate"]
+            [
+                "parse_valid_rate",
+                "action_space_valid_rate",
+                "exact_match_rate",
+                "macro_action_accuracy",
+                "non_modal_action_exact_match_rate",
+                "predicted_dominant_action_rate",
+                "dominant_action_collapse",
+            ]
         )
     if "next_frame" in task_names:
         required_metrics.extend(

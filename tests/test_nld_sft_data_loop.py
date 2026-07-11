@@ -1668,10 +1668,29 @@ class NldSftDataLoopTests(unittest.TestCase):
         self.assertEqual(policy_metrics["parse_valid_rate"], 1.0)
         self.assertEqual(policy_metrics["action_space_valid_rate"], 1.0)
         self.assertEqual(policy_metrics["exact_match_rate"], 0.5)
+        self.assertEqual(policy_metrics["macro_action_accuracy"], 0.5)
+        self.assertEqual(policy_metrics["predicted_dominant_action_rate"], 0.5)
+        self.assertEqual(policy_metrics["dominant_action_collapse"], 0.0)
         self.assertEqual(policy_metrics["role_exact_match/Sam"], 1.0)
         self.assertEqual(policy_metrics["role_exact_match/Wiz"], 0.0)
         self.assertEqual(frame_metrics["next_frame_exact_match_rate"], 1.0)
         self.assertEqual(frame_metrics["next_frame_char_accuracy"], 1.0)
+
+    def test_policy_metrics_expose_dominant_action_collapse(self) -> None:
+        metrics = compute_policy_metrics(
+            predictions=[{"action_id": 1}] * 4,
+            labels=[0, 1, 1, 2],
+            valid_action_ids={0, 1, 2},
+            metadata=[{"role": "Arc"}] * 4,
+        )
+
+        self.assertEqual(metrics["exact_match_rate"], 0.5)
+        self.assertAlmostEqual(metrics["macro_action_accuracy"], 1.0 / 3.0)
+        self.assertEqual(metrics["non_modal_action_exact_match_rate"], 0.0)
+        self.assertEqual(metrics["predicted_unique_action_count"], 1.0)
+        self.assertEqual(metrics["predicted_dominant_action_id"], 1.0)
+        self.assertEqual(metrics["predicted_dominant_action_rate"], 1.0)
+        self.assertEqual(metrics["dominant_action_collapse"], 1.0)
 
     def test_split_row_limits_reserve_validation_and_test_rows(self) -> None:
         manifest = ActionManifest(
