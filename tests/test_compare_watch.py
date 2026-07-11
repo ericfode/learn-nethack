@@ -152,15 +152,17 @@ class SeedableEnv(FakeEnv):
 
 
 class CountingBatchPolicy(TransformerCandidatePolicy):
-    def __init__(self) -> None:
+    def __init__(self, *, candidate_batch_size: int = 32) -> None:
         super().__init__(
             ModelWatchSpec(
                 role="current",
                 model_name="fixture-model",
                 adapter_checkpoint=None,
+                candidate_batch_size=candidate_batch_size,
             )
         )
         self.batch_calls = 0
+        self.batch_sizes: list[int] = []
 
     def _load(self):
         return object(), object(), object()
@@ -176,6 +178,7 @@ class CountingBatchPolicy(TransformerCandidatePolicy):
     ) -> list[float]:
         del model, tokenizer, torch, prompt
         self.batch_calls += 1
+        self.batch_sizes.append(len(completions))
         return [float(index) for index, _completion in enumerate(completions)]
 
 
@@ -383,6 +386,16 @@ class CompareWatchTests(unittest.TestCase):
 
         self.assertEqual(policy.batch_calls, 1)
         self.assertEqual(scores, {0: 0.0, 1: 1.0, 2: 2.0})
+
+    def test_transformer_policy_bounds_candidate_scoring_batch_size(self) -> None:
+        policy = CountingBatchPolicy(candidate_batch_size=2)
+
+        policy.score_actions(
+            user_prompt="Allowed action_ids: [0, 1, 2, 3, 4]",
+            valid_action_ids=[0, 1, 2, 3, 4],
+        )
+
+        self.assertEqual(policy.batch_sizes, [2, 2, 1])
 
     def test_transformer_policy_releases_cuda_cache_after_candidate_scoring(
         self,

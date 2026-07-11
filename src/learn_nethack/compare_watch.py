@@ -73,10 +73,13 @@ class ModelWatchSpec:
     adapter_checkpoint: str | None
     context_mode: str = "feedback_context_6"
     context_token_budget: int = 2_048
+    candidate_batch_size: int = 32
 
     def __post_init__(self) -> None:
         if self.context_token_budget <= 0:
             raise ValueError("context_token_budget must be positive")
+        if self.candidate_batch_size <= 0:
+            raise ValueError("candidate_batch_size must be positive")
         HistoryBuffer(max_items=1).history_for(
             gameid=0,
             mode=self.context_mode,
@@ -256,16 +259,22 @@ class TransformerCandidatePolicy:
         messages = build_policy_messages(user_prompt=user_prompt)
         prompt = _apply_chat_template(tokenizer, messages) + '{"action_id": '
         completions = [f"{int(action_id)}}}" for action_id in valid_action_ids]
-        try:
-            scores = self._score_completion_batch(
-                model=model,
-                tokenizer=tokenizer,
-                torch=torch,
-                prompt=prompt,
-                completions=completions,
-            )
-        finally:
-            _release_torch_cuda_cache(torch)
+        scores: list[float] = []
+        for start in range(0, len(completions), self.spec.candidate_batch_size):
+            try:
+                scores.extend(
+                    self._score_completion_batch(
+                        model=model,
+                        tokenizer=tokenizer,
+                        torch=torch,
+                        prompt=prompt,
+                        completions=completions[
+                            start : start + self.spec.candidate_batch_size
+                        ],
+                    )
+                )
+            finally:
+                _release_torch_cuda_cache(torch)
         return {
             int(action_id): float(score)
             for action_id, score in zip(valid_action_ids, scores, strict=True)
