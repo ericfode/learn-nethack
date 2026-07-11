@@ -5,7 +5,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from learn_nethack.status_dashboard import _goal_status, write_status_dashboard
+from learn_nethack.status_dashboard import (
+    _best_corrected_policy_report,
+    _goal_status,
+    write_status_dashboard,
+)
 
 
 class StatusDashboardTests(unittest.TestCase):
@@ -213,8 +217,11 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("Local Decoder Proof", html)
         self.assertIn("World model: local-proof", html)
         self.assertIn("live_rollout_utility_v7", html)
-        self.assertEqual(snapshot["goal_status"]["build_activity"], "running")
-        self.assertIn("full build still running", html)
+        self.assertEqual(
+            snapshot["goal_status"]["build_activity"],
+            "withheld_by_proof_gate",
+        )
+        self.assertIn("Full-corpus scaling is withheld", html)
 
     def test_goal_status_marks_incomplete_build_stalled_without_matching_task(
         self,
@@ -237,6 +244,46 @@ class StatusDashboardTests(unittest.TestCase):
 
         self.assertEqual(status["build_activity"], "stalled")
         self.assertEqual(status["label"], "Goal blocked: full build stalled")
+
+    def test_goal_status_prioritizes_latest_live_proof_failure(self) -> None:
+        status = _goal_status(
+            full_build={"train_ready": False},
+            baseline_eval={"eval_ready": False},
+            proof_gates=[
+                {
+                    "passed": False,
+                    "failed": [
+                        {"name": "watch_current_action_repeat_rate_ceiling"},
+                        {"name": "watch_current_score_or_depth_progress"},
+                    ],
+                }
+            ],
+            modal_apps={"status": "ok", "apps": []},
+        )
+
+        self.assertEqual(
+            status["label"],
+            "Corrected 20k rejected: live control failed",
+        )
+        self.assertEqual(status["build_activity"], "withheld_by_proof_gate")
+
+    def test_best_policy_report_excludes_higher_historical_pseudo_result(
+        self,
+    ) -> None:
+        report = _best_corrected_policy_report(
+            [
+                {
+                    "run": "historical-pseudo-20k",
+                    "exact_match_rate": {"trained": 0.9},
+                },
+                {
+                    "run": "corrected20k-single-policy",
+                    "exact_match_rate": {"trained": 0.6},
+                },
+            ]
+        )
+
+        self.assertEqual(report["run"], "corrected20k-single-policy")
 
 
 if __name__ == "__main__":

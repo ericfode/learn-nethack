@@ -117,9 +117,9 @@ def build_dashboard_snapshot(
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "repo_root": str(root),
         "objective": (
-            "Fine-tune Gemma on the entire NLD/NAO dataset and prove whether it "
-            "improved on next-1/5/10 frame prediction and live action sequences "
-            "that maximize score while minimizing damage."
+            "Produce a Gemma 4 checkpoint that beats frozen base and current-20k "
+            "on corrected policy/dynamics evidence and paired live NetHack play. "
+            "Scale only after the corrected-20k proof gate passes."
         ),
         "fitness_objective_version": FITNESS_OBJECTIVE_VERSION,
         "goal_status": goal_status,
@@ -150,9 +150,6 @@ def build_dashboard_snapshot(
 def render_dashboard_html(*, snapshot: Mapping[str, Any], html_path: Path) -> str:
     """Render a self-contained HTML dashboard from a collected snapshot."""
     full_build = dict(snapshot.get("full_build") or {})
-    progress = dict(full_build.get("progress") or {})
-    progress_latest = dict(progress.get("latest") or {})
-    baseline_eval = dict(snapshot.get("baseline_eval") or {})
     wandb = dict(snapshot.get("wandb") or {})
     shards = dict(snapshot.get("shards") or {})
     goal_status = dict(snapshot.get("goal_status") or {})
@@ -162,6 +159,12 @@ def render_dashboard_html(*, snapshot: Mapping[str, Any], html_path: Path) -> st
     world_model_proof = dict(snapshot.get("world_model_proof") or {})
     modal_apps = dict(snapshot.get("modal_apps") or {})
     todo = list(snapshot.get("todo") or [])
+    latest_score = _best_corrected_policy_report(score_reports)
+    latest_exact = dict(latest_score.get("exact_match_rate") or {})
+    latest_gate = proof_gates[0] if proof_gates else {}
+    training_reports = list(snapshot.get("training_reports") or [])
+    latest_training = training_reports[0] if training_reports else {}
+    online_wandb_recorded = any(report.get("wandb_url") for report in training_reports)
 
     selected_demo = _first_demo_with_frame(demos)
     demo_src = (
@@ -189,33 +192,36 @@ def render_dashboard_html(*, snapshot: Mapping[str, Any], html_path: Path) -> st
             '<p class="eyebrow">Learn NetHack</p>',
             "<h1>Training Goal Dashboard</h1>",
             f"<p>{_esc(snapshot.get('objective'))}</p>",
+            f'<p class="decision-reason">{_esc(goal_status.get("reason"))}</p>',
             "</div>",
             f'<span class="status-pill status-{_esc(goal_status.get("tone", "warn"))}">{_esc(goal_status.get("label", "Unknown"))}</span>',
             "</section>",
             '<section class="kpi-grid">',
             _kpi_card(
-                "Full build",
-                "Train-ready" if full_build.get("train_ready") else "Not ready",
-                _format_build_progress(progress_latest, full_build),
-                tone="good" if full_build.get("train_ready") else "warn",
+                "Corrected 20k policy",
+                _format_rate(latest_exact.get("trained")),
+                f"baseline {_format_rate(latest_exact.get('baseline'))}; offline exact match",
+                tone="good" if latest_exact.get("improved") else "warn",
             ),
             _kpi_card(
-                "Accepted rows",
-                _format_int(progress_latest.get("accepted_policy_rows")),
-                "policy rows; same count for next-frame rows",
-                tone="neutral",
+                "Live proof gate",
+                "Passed" if latest_gate.get("passed") else "Failed",
+                f"{_format_int(latest_gate.get('failed_count'))} failed requirements",
+                tone="good" if latest_gate.get("passed") else "bad",
             ),
             _kpi_card(
-                "Baseline eval",
-                "Ready" if baseline_eval.get("eval_ready") else "Waiting",
-                _join_list(baseline_eval.get("missing_markers"), "missing markers"),
-                tone="good" if baseline_eval.get("eval_ready") else "warn",
+                "Latest training",
+                str(latest_training.get("status") or "Waiting").title(),
+                f"loss {_format_float(latest_training.get('train_loss'))}",
+                tone="good" if latest_training.get("status") == "completed" else "warn",
             ),
             _kpi_card(
-                "W&B local state",
-                "Configured" if wandb.get("api_key_configured") else "API key absent",
-                f"{_format_int(wandb.get('offline_run_count'))} offline runs visible locally",
-                tone="good" if wandb.get("api_key_configured") else "bad",
+                "W&B evidence",
+                "Online runs recorded"
+                if online_wandb_recorded
+                else "No online run found",
+                f"{_format_int(wandb.get('offline_run_count'))} local offline runs",
+                tone="good" if online_wandb_recorded else "bad",
             ),
             "</section>",
             '<section class="two-col">',
@@ -276,6 +282,43 @@ def _goal_status(
     proof_gates: Sequence[Mapping[str, Any]],
     modal_apps: Mapping[str, Any],
 ) -> dict[str, str]:
+    latest_gate = proof_gates[0] if proof_gates else {}
+    if latest_gate:
+        if latest_gate.get("passed") is True:
+            return {
+                "label": "Improvement proved",
+                "tone": "good",
+                "reason": "Latest corrected proof gate passed.",
+            }
+        failed_names = {
+            str(item.get("name")) for item in latest_gate.get("failed") or []
+        }
+        live_control_failed = bool(
+            failed_names
+            & {
+                "watch_current_action_repeat_rate_ceiling",
+                "watch_current_zero_progress_episode_ceiling",
+                "watch_current_score_or_depth_progress",
+                "watch_action_repeat_rate",
+                "watch_score_or_depth_progress",
+            }
+        )
+        return {
+            "label": (
+                "Corrected 20k rejected: live control failed"
+                if live_control_failed
+                else "Corrected 20k proof failed"
+            ),
+            "tone": "bad",
+            "reason": (
+                "Offline imitation improved, but paired live rollouts collapsed "
+                "and made no score, reward, or depth progress. Full-corpus scaling "
+                "is withheld."
+                if live_control_failed
+                else "The latest corrected proof gate did not pass."
+            ),
+            "build_activity": "withheld_by_proof_gate",
+        }
     if not full_build.get("train_ready"):
         build_activity = _full_build_activity(
             full_build=full_build,
@@ -356,6 +399,40 @@ def _build_todo_items(
     wandb_status: Mapping[str, Any],
     proof_gates: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, str]]:
+    latest_gate = proof_gates[0] if proof_gates else {}
+    if latest_gate and latest_gate.get("passed") is not True:
+        return [
+            {
+                "label": "Corrected 20k offline policy gate",
+                "status": "done",
+                "detail": "Assistant-only true-keypress SFT improved held-out policy metrics without offline collapse.",
+            },
+            {
+                "label": "Paired live smoke gate",
+                "status": "failed",
+                "detail": "Single-frame collapsed to SEARCH; growing-context collapsed to Escape; both made zero progress.",
+            },
+            {
+                "label": "Correct live distribution shift",
+                "status": "active",
+                "detail": "Add on-policy recovery states, action-balance controls, and anti-repetition training before more rollout scale.",
+            },
+            {
+                "label": "Train and gate corrected dynamics",
+                "status": "pending",
+                "detail": "Must beat copy-current and deterministic next-1/5/10 changed-state baselines.",
+            },
+            {
+                "label": "Run 16-role live proof",
+                "status": "blocked",
+                "detail": "Blocked until a paired smoke shows absolute progress without collapse.",
+            },
+            {
+                "label": "Scale to full corpus",
+                "status": "blocked",
+                "detail": "Corrected-20k promotion gate failed; full-corpus training is not authorized.",
+            },
+        ]
     items = [
         {
             "label": "Finish full-dataset SFT build",
@@ -1013,6 +1090,39 @@ def _format_int(value: Any) -> str:
         return "0"
 
 
+def _best_corrected_policy_report(
+    reports: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    corrected = [
+        report
+        for report in reports
+        if str(report.get("run") or "").startswith("corrected20k-")
+    ]
+    candidates = corrected or list(reports)
+    if not candidates:
+        return {}
+    return max(
+        candidates,
+        key=lambda report: float(
+            (report.get("exact_match_rate") or {}).get("trained") or 0.0
+        ),
+    )
+
+
+def _format_rate(value: Any) -> str:
+    try:
+        return f"{float(value) * 100.0:.1f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _format_float(value: Any) -> str:
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
 def _format_pct(value: float) -> str:
     return f"{value * 100.0:.1f}%"
 
@@ -1079,6 +1189,7 @@ h2 { margin: 0 0 14px; font-size: 19px; letter-spacing: 0; }
 h3 { margin: 18px 0 10px; font-size: 15px; letter-spacing: 0; }
 p { margin: 8px 0 0; }
 .muted { color: var(--muted); }
+.decision-reason { color: var(--muted); font-weight: 700; }
 .status-pill {
   display: inline-flex;
   white-space: nowrap;
@@ -1126,8 +1237,11 @@ p { margin: 8px 0 0; }
 .step-pending { border-left-color: var(--line); }
 .todo, .sources { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .todo li, .sources li { padding: 9px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fafbf9; }
+.todo b, .todo span, .sources b, .sources span { display: block; }
 .todo-done { border-left: 5px solid var(--good) !important; }
 .todo-active { border-left: 5px solid var(--warn) !important; }
+.todo-failed { border-left: 5px solid var(--bad) !important; }
+.todo-blocked { border-left: 5px solid var(--bad) !important; opacity: 0.78; }
 .todo-pending { border-left: 5px solid var(--line) !important; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
 th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 8px 7px; vertical-align: top; }
