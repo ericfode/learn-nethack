@@ -13,6 +13,7 @@ from learn_nethack.action_manifest import ActionManifest, load_action_manifest
 from learn_nethack.observations import render_observation_text
 from learn_nethack import policy_feedback
 from learn_nethack.sft_rows import POLICY_SYSTEM_PROMPT
+from learn_nethack.ttyrec import write_terminal_ttyrec
 
 
 COMPARE_EVENT_SCHEMA_VERSION = "learn-nethack.compare-watch-event.v1"
@@ -518,6 +519,8 @@ def run_side_by_side_rollout(
     latest_path = target / "latest.json"
     report_path = target / "report.json"
     viewer_path = target / "index.html"
+    current_ttyrec_path = target / "current.ttyrec"
+    baseline_ttyrec_path = target / "baseline.ttyrec"
     valid_action_ids = action_manifest.valid_action_ids()
     _validate_env_action_space(
         action_manifest=action_manifest,
@@ -593,6 +596,17 @@ def run_side_by_side_rollout(
             if current_done and baseline_done:
                 break
 
+    write_terminal_ttyrec(
+        current_ttyrec_path,
+        [current_initial_frame]
+        + [str(event["current"]["terminal_frame"]) for event in events],
+    )
+    write_terminal_ttyrec(
+        baseline_ttyrec_path,
+        [baseline_initial_frame]
+        + [str(event["baseline"]["terminal_frame"]) for event in events],
+    )
+
     report = {
         "schema_version": COMPARE_REPORT_SCHEMA_VERSION,
         "run_id": run_id,
@@ -610,6 +624,8 @@ def run_side_by_side_rollout(
         "events_path": str(events_path),
         "latest_path": str(latest_path),
         "viewer_path": str(viewer_path),
+        "current_ttyrec_path": str(current_ttyrec_path),
+        "baseline_ttyrec_path": str(baseline_ttyrec_path),
         "rollout_metrics": {
             "objective": (
                 "maximize live_rollout_utility_v7: score/reward/depth progress "
@@ -1110,6 +1126,8 @@ def _sweep_seed_report_summary(
         "latest_path": str(seed_dir / "latest.json"),
         "viewer_path": str(seed_dir / "index.html"),
         "report_path": str(seed_dir / "report.json"),
+        "current_ttyrec_path": str(seed_dir / "current.ttyrec"),
+        "baseline_ttyrec_path": str(seed_dir / "baseline.ttyrec"),
         "rollout_metrics": dict(report.get("rollout_metrics") or {}),
     }
 

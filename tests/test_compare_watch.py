@@ -404,12 +404,20 @@ class CompareWatchTests(unittest.TestCase):
             events_path = out_dir / "events.jsonl"
             html_path = out_dir / "index.html"
             report_path = out_dir / "report.json"
+            current_ttyrec_path = out_dir / "current.ttyrec"
+            baseline_ttyrec_path = out_dir / "baseline.ttyrec"
 
             self.assertTrue(events_path.exists())
             self.assertTrue(html_path.exists())
             self.assertTrue(report_path.exists())
+            self.assertGreater(current_ttyrec_path.stat().st_size, 0)
+            self.assertGreater(baseline_ttyrec_path.stat().st_size, 0)
             self.assertEqual(report["event_count"], 2)
             self.assertEqual(report["viewer_path"], str(html_path))
+            self.assertEqual(
+                report["current_ttyrec_path"],
+                str(current_ttyrec_path),
+            )
             self.assertFalse(report["paired_initial_state_equal"])
             self.assertEqual(
                 report["rollout_metrics"]["current"]["cumulative_reward"],

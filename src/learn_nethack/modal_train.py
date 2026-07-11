@@ -77,6 +77,11 @@ from learn_nethack.sft_train import (
     resolve_jsonl_training_config,
     summarize_trainer_loss_history,
 )
+from learn_nethack.watch_reporting import (
+    initialize_watch_wandb_run,
+    record_watch_failure,
+    watch_sweep_wandb_replay_media,
+)
 from learn_nethack.modal_upload import safe_extract_tar_shard
 from learn_nethack.wandb_logging import log_sft_build_to_wandb
 from learn_nethack.compare_watch import (
@@ -2036,18 +2041,39 @@ def _watch_compare_impl(
         }
 
     wandb_mode = resolve_wandb_mode(os.environ)
-    report = run_checkpoint_compare(
-        run_id=run_id,
-        current_checkpoint=contract["watch"]["current_checkpoint"],
-        action_manifest_path=action_manifest,
-        out_dir=contract["artifacts"]["watch_dir"],
-        model_name=model_name,
-        env_id=env_id,
-        character=character,
-        seed=seed,
-        max_steps=max_steps,
-        device=device,
+    wandb, run, wandb_report = initialize_watch_wandb_run(
+        contract=contract,
+        contract_path=contract_path,
+        mode=wandb_mode.mode,
+        job_type="watch-compare",
+        commit_volume=_commit_mounted_volume,
     )
+    try:
+        report = run_checkpoint_compare(
+            run_id=run_id,
+            current_checkpoint=contract["watch"]["current_checkpoint"],
+            action_manifest_path=action_manifest,
+            out_dir=contract["artifacts"]["watch_dir"],
+            model_name=model_name,
+            env_id=env_id,
+            character=character,
+            seed=seed,
+            max_steps=max_steps,
+            device=device,
+        )
+    except Exception as exc:
+        record_watch_failure(
+            wandb=wandb,
+            run=run,
+            contract=contract,
+            contract_path=contract_path,
+            mode=wandb_mode.mode,
+            stage="rollout",
+            error=exc,
+            wandb_report=wandb_report,
+            commit_volume=_commit_mounted_volume,
+        )
+        raise
     events_path = Path(report["events_path"])
     events = [
         json.loads(line)
@@ -2075,17 +2101,7 @@ def _watch_compare_impl(
         "wandb_mode": wandb_mode.mode,
     }
 
-    import wandb
-
-    run = wandb.init(
-        project="learn-nethack",
-        name=run_id,
-        job_type="watch-compare",
-        mode=wandb_mode.mode,
-        config=watch_report,
-        dir=contract["artifacts"]["root"],
-    )
-    watch_report["wandb"] = _wandb_run_report(run, wandb_mode.mode)
+    watch_report["wandb"] = wandb_report
     _write_json(contract["artifacts"]["report"], watch_report)
     watch_metric_names = (
         "fitness_score",
@@ -2136,13 +2152,29 @@ def _watch_compare_impl(
             rollout_deltas.get(metric_name) or 0.0
         )
     run.log(watch_log)
+    run.log(
+        {
+            "watch/replay": wandb.Html(
+                str(report["viewer_path"]),
+                inject=False,
+            )
+        }
+    )
     artifact = wandb.Artifact(name=f"watch-compare-{run_id}", type="evaluation")
-    for path_name in ("events_path", "latest_path", "viewer_path"):
+    for path_name in (
+        "events_path",
+        "latest_path",
+        "viewer_path",
+        "current_ttyrec_path",
+        "baseline_ttyrec_path",
+    ):
         artifact.add_file(str(report[path_name]))
     artifact.add_file(str(Path(contract["artifacts"]["report"])))
     artifact.add_file(str(contract_path))
     run.log_artifact(artifact)
     run.finish()
+    _commit_mounted_volume("/watch")
+    _commit_mounted_volume("/runs")
     return {
         **watch_report,
     }
@@ -2182,18 +2214,39 @@ def _watch_compare_sweep_impl(
         }
 
     wandb_mode = resolve_wandb_mode(os.environ)
-    report = run_checkpoint_compare_sweep(
-        run_id=run_id,
-        current_checkpoint=contract["watch"]["current_checkpoint"],
-        action_manifest_path=action_manifest,
-        out_dir=contract["artifacts"]["watch_dir"],
-        model_name=model_name,
-        env_id=env_id,
-        character=character,
-        seeds=contract["watch"]["seeds"],
-        max_steps=max_steps,
-        device=device,
+    wandb, run, wandb_report = initialize_watch_wandb_run(
+        contract=contract,
+        contract_path=contract_path,
+        mode=wandb_mode.mode,
+        job_type="watch-compare-sweep",
+        commit_volume=_commit_mounted_volume,
     )
+    try:
+        report = run_checkpoint_compare_sweep(
+            run_id=run_id,
+            current_checkpoint=contract["watch"]["current_checkpoint"],
+            action_manifest_path=action_manifest,
+            out_dir=contract["artifacts"]["watch_dir"],
+            model_name=model_name,
+            env_id=env_id,
+            character=character,
+            seeds=contract["watch"]["seeds"],
+            max_steps=max_steps,
+            device=device,
+        )
+    except Exception as exc:
+        record_watch_failure(
+            wandb=wandb,
+            run=run,
+            contract=contract,
+            contract_path=contract_path,
+            mode=wandb_mode.mode,
+            stage="rollout_sweep",
+            error=exc,
+            wandb_report=wandb_report,
+            commit_volume=_commit_mounted_volume,
+        )
+        raise
     hf_cache_committed = _commit_mounted_volume(HF_CACHE_MOUNT_PATH)
     watch_committed = _commit_mounted_volume("/watch")
     runs_committed = _commit_mounted_volume("/runs")
@@ -2208,19 +2261,15 @@ def _watch_compare_sweep_impl(
         "wandb_mode": wandb_mode.mode,
     }
 
-    import wandb
-
-    run = wandb.init(
-        project="learn-nethack",
-        name=run_id,
-        job_type="watch-compare-sweep",
-        mode=wandb_mode.mode,
-        config=watch_report,
-        dir=contract["artifacts"]["root"],
-    )
-    watch_report["wandb"] = _wandb_run_report(run, wandb_mode.mode)
+    watch_report["wandb"] = wandb_report
     _write_json(contract["artifacts"]["report"], watch_report)
     run.log(_watch_sweep_wandb_metrics(watch_report))
+    replay_media = watch_sweep_wandb_replay_media(
+        wandb,
+        watch_report.get("seed_reports", []),
+    )
+    if replay_media:
+        run.log(replay_media)
     artifact = wandb.Artifact(name=f"watch-compare-sweep-{run_id}", type="evaluation")
     artifact.add_file(str(contract["artifacts"]["report"]))
     artifact.add_file(str(contract_path))
@@ -2234,6 +2283,8 @@ def _watch_compare_sweep_impl(
         artifact.add_file(str(path), name=artifact_name)
     run.log_artifact(artifact)
     run.finish()
+    _commit_mounted_volume("/watch")
+    _commit_mounted_volume("/runs")
     return watch_report
 
 
@@ -2248,7 +2299,14 @@ def _watch_sweep_artifact_file_entries(
             continue
         seed = seed_report.get("seed", "unknown")
         seed_dir_name = f"seed-{seed}"
-        for key in ("events_path", "latest_path", "viewer_path", "report_path"):
+        for key in (
+            "events_path",
+            "latest_path",
+            "viewer_path",
+            "report_path",
+            "current_ttyrec_path",
+            "baseline_ttyrec_path",
+        ):
             path = seed_report.get(key)
             if not path:
                 continue
