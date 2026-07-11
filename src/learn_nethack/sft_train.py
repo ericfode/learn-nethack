@@ -9,7 +9,7 @@ import math
 import os
 import random
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from learn_nethack.wandb_logging import resolve_local_wandb_mode
 
@@ -156,6 +156,182 @@ def format_row_for_sft(row: dict[str, Any], tokenizer: Any) -> dict[str, Any]:
     }
 
 
+def tokenize_row_for_assistant_only_loss(
+    row: Mapping[str, Any],
+    tokenizer: Any,
+    *,
+    max_seq_length: int,
+) -> dict[str, Any]:
+    """Tokenize one chat row and mask everything before the final response."""
+    if max_seq_length <= 0:
+        raise ValueError("max_seq_length must be positive")
+    messages = row.get("messages")
+    if not isinstance(messages, list) or len(messages) < 2:
+        raise ValueError("SFT row must contain at least two chat messages")
+    if not all(isinstance(message, Mapping) for message in messages):
+        raise ValueError("SFT row messages must be objects")
+    if messages[-1].get("role") != "assistant":
+        raise ValueError("SFT row must end with an assistant message")
+
+    prompt_ids = _chat_template_token_ids(
+        tokenizer,
+        messages[:-1],
+        add_generation_prompt=True,
+    )
+    full_ids = _chat_template_token_ids(
+        tokenizer,
+        messages,
+        add_generation_prompt=False,
+    )
+    if full_ids[: len(prompt_ids)] != prompt_ids:
+        raise ValueError(
+            "chat template does not produce a verifiable final assistant suffix"
+        )
+    assistant_token_count = len(full_ids) - len(prompt_ids)
+    if assistant_token_count <= 0:
+        raise ValueError("chat template produced no final assistant tokens")
+
+    input_ids = full_ids[:max_seq_length]
+    masked_prompt_tokens = min(len(prompt_ids), len(input_ids))
+    supervised_tokens = len(input_ids) - masked_prompt_tokens
+    if supervised_tokens <= 0:
+        raise ValueError(
+            "max_seq_length truncates every final assistant token; shorten the prompt "
+            "or increase max_seq_length"
+        )
+    labels = [-100] * masked_prompt_tokens + input_ids[masked_prompt_tokens:]
+    assistant_tokens_truncated = max(0, assistant_token_count - supervised_tokens)
+    return {
+        "input_ids": input_ids,
+        "labels": labels,
+        "task": row.get("task"),
+        "input_token_count": len(input_ids),
+        "prompt_token_count": masked_prompt_tokens,
+        "masked_prompt_token_count": masked_prompt_tokens,
+        "assistant_token_count": assistant_token_count,
+        "supervised_assistant_token_count": supervised_tokens,
+        "assistant_tokens_truncated": assistant_tokens_truncated,
+        "truncated_token_count": max(0, len(full_ids) - len(input_ids)),
+    }
+
+
+def build_assistant_mask_report(
+    tokenized_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate auditable assistant-only token counts for a trainer dataset."""
+    totals = _empty_assistant_mask_counts()
+    per_task: dict[str, dict[str, int]] = {}
+    for row in tokenized_rows:
+        task = str(row.get("task") or "unknown")
+        task_counts = per_task.setdefault(task, _empty_assistant_mask_counts())
+        for counts in (totals, task_counts):
+            counts["row_count"] += 1
+            for key in (
+                "input_token_count",
+                "prompt_token_count",
+                "masked_prompt_token_count",
+                "assistant_token_count",
+                "supervised_assistant_token_count",
+                "assistant_tokens_truncated",
+                "truncated_token_count",
+            ):
+                counts[key] += int(row[key])
+            if int(row["assistant_tokens_truncated"]) > 0:
+                counts["rows_with_truncated_assistant"] += 1
+
+    supervised = totals["supervised_assistant_token_count"]
+    input_tokens = totals["input_token_count"]
+    report: dict[str, Any] = {
+        "schema_version": "learn-nethack.assistant-mask-report.v1",
+        **totals,
+        "supervised_token_fraction": (
+            supervised / input_tokens if input_tokens else 0.0
+        ),
+        "per_task": {},
+    }
+    for task, counts in sorted(per_task.items()):
+        task_input_tokens = counts["input_token_count"]
+        report["per_task"][task] = {
+            **counts,
+            "supervised_token_fraction": (
+                counts["supervised_assistant_token_count"] / task_input_tokens
+                if task_input_tokens
+                else 0.0
+            ),
+        }
+    if totals["row_count"] <= 0:
+        raise ValueError("assistant-mask report requires at least one row")
+    if supervised <= 0:
+        raise ValueError("assistant-mask report contains no supervised tokens")
+    return report
+
+
+def get_trainer_assistant_mask_report(trainer: Any) -> dict[str, Any]:
+    """Return the verified assistant-only mask report attached to a trainer."""
+    report = getattr(trainer, "learn_nethack_assistant_mask_report", None)
+    if not isinstance(report, dict):
+        raise RuntimeError("SFT trainer is missing its assistant-mask report")
+    return report
+
+
+def summarize_trainer_loss_history(
+    history: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Summarize logged training losses for a small-run learning gate."""
+    losses = [
+        float(entry["loss"])
+        for entry in history
+        if isinstance(entry.get("loss"), int | float)
+    ]
+    return {
+        "logged_loss_count": len(losses),
+        "first_loss": losses[0] if losses else None,
+        "last_loss": losses[-1] if losses else None,
+        "minimum_loss": min(losses) if losses else None,
+        "loss_decreased": len(losses) >= 2 and losses[-1] < losses[0],
+    }
+
+
+def _chat_template_token_ids(
+    tokenizer: Any,
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    add_generation_prompt: bool,
+) -> list[int]:
+    encoded = tokenizer.apply_chat_template(
+        list(messages),
+        tokenize=True,
+        add_generation_prompt=add_generation_prompt,
+    )
+    if isinstance(encoded, Mapping):
+        encoded = encoded.get("input_ids")
+    tolist = getattr(encoded, "tolist", None)
+    if callable(tolist):
+        encoded = tolist()
+    if isinstance(encoded, list) and len(encoded) == 1 and isinstance(encoded[0], list):
+        encoded = encoded[0]
+    if not isinstance(encoded, list) or not all(
+        isinstance(token_id, int) and not isinstance(token_id, bool)
+        for token_id in encoded
+    ):
+        raise ValueError("chat template must return a flat list of integer token IDs")
+    return encoded
+
+
+def _empty_assistant_mask_counts() -> dict[str, int]:
+    return {
+        "row_count": 0,
+        "input_token_count": 0,
+        "prompt_token_count": 0,
+        "masked_prompt_token_count": 0,
+        "assistant_token_count": 0,
+        "supervised_assistant_token_count": 0,
+        "assistant_tokens_truncated": 0,
+        "truncated_token_count": 0,
+        "rows_with_truncated_assistant": 0,
+    }
+
+
 def load_jsonl_rows(paths: Sequence[str | Path]) -> list[dict[str, Any]]:
     """Load SFT JSONL rows from one or more local artifact files."""
     import json
@@ -208,11 +384,23 @@ def create_unsloth_sft_trainer(
         random_state=config.seed,
     )
     apply_gradient_checkpointing_contract(model, config)
-    dataset = Dataset.from_list(list(rows))
+    if not config.train_on_assistant_only:
+        raise ValueError("NetHack SFT requires train_on_assistant_only=True")
+    tokenized_rows = [
+        tokenize_row_for_assistant_only_loss(
+            row,
+            tokenizer,
+            max_seq_length=config.max_seq_length,
+        )
+        for row in rows
+    ]
+    assistant_mask_report = build_assistant_mask_report(tokenized_rows)
+    dataset = Dataset.from_list(tokenized_rows)
     training_args = SFTConfig(
         output_dir=str(output_dir),
         max_length=config.max_seq_length,
-        assistant_only_loss=config.train_on_assistant_only,
+        completion_only_loss=False,
+        assistant_only_loss=False,
         gradient_checkpointing=bool(config.use_gradient_checkpointing),
         per_device_train_batch_size=config.per_device_train_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
@@ -225,12 +413,14 @@ def create_unsloth_sft_trainer(
         seed=config.seed,
         dataset_num_proc=None,
     )
-    return SFTTrainer(
+    trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=dataset,
         args=training_args,
     )
+    trainer.learn_nethack_assistant_mask_report = assistant_mask_report
+    return trainer
 
 
 def build_sft_jsonl_training_plan(
@@ -671,34 +861,40 @@ def create_unsloth_sft_trainer_from_jsonl(
             "datasets and trl are required to create the SFT trainer"
         ) from exc
     configure_training_runtime(config)
+    if not config.train_on_assistant_only:
+        raise ValueError("NetHack SFT requires train_on_assistant_only=True")
     dataset = load_dataset(
         "json",
         data_files=[str(path) for path in paths],
         split="train",
     )
 
+    tokenized_rows_for_report: list[dict[str, Any]] = []
+
     def _format_batch(batch: dict[str, list[Any]]) -> dict[str, list[Any]]:
-        texts = [
-            tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
+        tasks = batch.get("task", [None] * len(batch["messages"]))
+        tokenized_rows = []
+        for messages, task in zip(batch["messages"], tasks):
+            tokenized = tokenize_row_for_assistant_only_loss(
+                {"messages": messages, "task": task},
+                tokenizer,
+                max_seq_length=config.max_seq_length,
             )
-            for messages in batch["messages"]
-        ]
-        return {"text": texts, "task": batch.get("task", [None] * len(texts))}
+            tokenized_rows.append(tokenized)
+            tokenized_rows_for_report.append(tokenized)
+        return {key: [row[key] for row in tokenized_rows] for key in tokenized_rows[0]}
 
     dataset = dataset.map(
         _format_batch,
         batched=True,
-        remove_columns=[
-            column for column in dataset.column_names if column not in {"text", "task"}
-        ],
+        remove_columns=list(dataset.column_names),
+        load_from_cache_file=False,
     )
+    assistant_mask_report = build_assistant_mask_report(tokenized_rows_for_report)
     training_args = SFTConfig(
         output_dir=str(output_dir),
         max_length=config.max_seq_length,
-        dataset_text_field="text",
+        completion_only_loss=False,
         assistant_only_loss=False,
         gradient_checkpointing=bool(config.use_gradient_checkpointing),
         per_device_train_batch_size=config.per_device_train_batch_size,
@@ -712,12 +908,14 @@ def create_unsloth_sft_trainer_from_jsonl(
         seed=config.seed,
         dataset_num_proc=None,
     )
-    return SFTTrainer(
+    trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=dataset,
         args=training_args,
     )
+    trainer.learn_nethack_assistant_mask_report = assistant_mask_report
+    return trainer
 
 
 def load_unsloth_lora_model(config: SftTrainConfig) -> tuple[Any, Any]:

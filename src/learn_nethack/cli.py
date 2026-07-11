@@ -43,16 +43,27 @@ from learn_nethack.modal_config import (
     DEFAULT_WATCH_PROOF_SEEDS,
     sft_existing_dataset_followup_commands,
 )
-from learn_nethack.nld_decode import iter_nld_ttyrec_batches
+from learn_nethack.nld_decode import iter_nld_ttyrec_batches, normalize_decoded_batch
 from learn_nethack.nld_index import build_altorg_index
 from learn_nethack.nld_metadata import inspect_nld_db
-from learn_nethack.nld_metadata import read_game_metadata, read_gameids
+from learn_nethack.nld_metadata import (
+    order_gameids_for_split_role_coverage,
+    read_game_metadata,
+    read_gameids,
+)
+from learn_nethack.pseudo_label_audit import (
+    build_pseudo_label_audit_report,
+    stratified_audit_gameids,
+    write_pseudo_label_audit_report,
+)
 from learn_nethack.rollout_preferences import write_rollout_preference_jsonl
-from learn_nethack.sft_build import build_sft_from_decoded_batches
+from learn_nethack.sft_build import SplitRowLimits, build_sft_from_decoded_batches
 from learn_nethack.sft_eval import (
     build_score_to_beat_report,
     build_training_proof_gate_report,
 )
+from learn_nethack.sft_fixture import build_sft_overfit_fixture
+from learn_nethack.sft_integrity import audit_sft_dataset, write_sft_integrity_report
 from learn_nethack.sft_train import SftTrainConfig
 from learn_nethack.status_dashboard import (
     DEFAULT_BASELINE_EVAL_RUN_ID,
@@ -60,7 +71,11 @@ from learn_nethack.status_dashboard import (
     write_status_dashboard,
 )
 from learn_nethack.wandb_logging import build_wandb_visibility_report
-from learn_nethack.wandb_logging import log_sft_build_to_wandb
+from learn_nethack.wandb_logging import (
+    log_pseudo_label_audit_to_wandb,
+    log_sft_build_to_wandb,
+    log_sft_integrity_to_wandb,
+)
 
 
 app = typer.Typer(help="Gemma/NetHack pipeline commands.")
@@ -94,6 +109,27 @@ def resolve_build_row_limit(*, max_rows: int, full_dataset: bool) -> int | None:
     return max_rows
 
 
+def resolve_split_row_limits(
+    *,
+    train_rows: int,
+    validation_rows: int,
+    test_rows: int,
+    full_dataset: bool,
+) -> SplitRowLimits | None:
+    """Resolve an optional balanced capped-build contract."""
+    if validation_rows == 0 and test_rows == 0:
+        return None
+    if full_dataset:
+        raise ValueError("full dataset builds cannot use split row limits")
+    if train_rows <= 0 or validation_rows <= 0 or test_rows <= 0:
+        raise ValueError("train, validation, and test row limits must all be positive")
+    return SplitRowLimits(
+        train=train_rows,
+        validation=validation_rows,
+        test=test_rows,
+    )
+
+
 @data_app.command("inspect")
 def inspect_data(
     db: Path = typer.Option(..., "--db", help="Path to local NLD ttyrecs.db."),
@@ -109,6 +145,8 @@ def build_sft(
     mode: str = typer.Option("single_frame", "--mode"),
     out: Path = typer.Option(..., "--out", help="Output artifact directory."),
     max_rows: int = typer.Option(1000, "--max-rows"),
+    validation_rows: int = typer.Option(0, "--validation-rows"),
+    test_rows: int = typer.Option(0, "--test-rows"),
     full_dataset: bool = typer.Option(
         False,
         "--full-dataset",
@@ -122,6 +160,7 @@ def build_sft(
     ),
     batch_size: int = typer.Option(128, "--batch-size"),
     seq_length: int = typer.Option(32, "--seq-length"),
+    progress_interval: int = typer.Option(5_000, "--progress-interval"),
     seed: int = typer.Option(20260615, "--seed"),
     wandb_project: str = typer.Option("learn-nethack", "--wandb-project"),
     wandb_run_name: str | None = typer.Option(None, "--wandb-run-name"),
@@ -131,6 +170,12 @@ def build_sft(
     try:
         effective_max_rows = resolve_build_row_limit(
             max_rows=max_rows,
+            full_dataset=full_dataset,
+        )
+        split_row_limits = resolve_split_row_limits(
+            train_rows=max_rows,
+            validation_rows=validation_rows,
+            test_rows=test_rows,
             full_dataset=full_dataset,
         )
     except ValueError as exc:
@@ -143,6 +188,28 @@ def build_sft(
         )
     manifest = load_action_manifest(action_manifest)
     gameids = read_gameids(db)
+    game_metadata = read_game_metadata(db)
+    if split_row_limits is None:
+        decode_gameids = gameids
+        game_order_strategy = "gameid_ascending"
+    else:
+        decode_gameids = order_gameids_for_split_role_coverage(
+            gameids,
+            game_metadata_by_id=game_metadata,
+            seed=seed,
+        )
+        game_order_strategy = "split_role_round_robin_v1"
+    progress_path = out / "sft_build_progress.jsonl"
+    out.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text("", encoding="utf-8")
+
+    def _write_progress(event: object) -> None:
+        payload = dict(getattr(event, "__dict__", {}))
+        line = json.dumps(payload, sort_keys=True)
+        with progress_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        typer.echo(line, err=True)
+
     result = build_sft_from_decoded_batches(
         dataset_name=report.dataset_name,
         mode=mode,
@@ -151,17 +218,21 @@ def build_sft(
             batch_size=batch_size,
             seq_length=seq_length,
             dbfilename=str(db),
-            gameids=gameids,
+            gameids=decode_gameids,
             shuffle=False,
             loop_forever=False,
         ),
         action_manifest=manifest,
         gameids=gameids,
-        game_metadata_by_id=read_game_metadata(db),
+        game_metadata_by_id=game_metadata,
         out_dir=out,
-        max_rows=effective_max_rows,
+        max_rows=None if split_row_limits is not None else effective_max_rows,
         seed=seed,
         tasks=task_names,
+        split_row_limits=split_row_limits,
+        progress_callback=_write_progress,
+        progress_interval=progress_interval,
+        game_order_strategy=game_order_strategy,
     )
     wandb_mode = log_sft_build_to_wandb(
         output_dir=out,
@@ -178,9 +249,15 @@ def build_sft(
             "batch_size": batch_size,
             "seq_length": seq_length,
             "max_rows": effective_max_rows,
+            "split_row_limits": (
+                split_row_limits.as_dict() if split_row_limits is not None else None
+            ),
             "full_dataset": full_dataset,
             "seed": seed,
+            "game_order_strategy": game_order_strategy,
             "action_manifest_path": str(action_manifest),
+            "progress_path": str(progress_path),
+            "progress_interval": progress_interval,
         },
         project=wandb_project,
         run_name=wandb_run_name,
@@ -216,6 +293,146 @@ def write_action_manifest(
     )
 
 
+@data_app.command("audit-pseudo-labels")
+def audit_pseudo_labels(
+    db: Path = typer.Option(..., "--db", help="Path to a labelled NLD ttyrecs.db."),
+    action_manifest: Path = typer.Option(
+        ...,
+        "--action-manifest",
+        help="Action manifest used to map true keypresses and pseudo labels.",
+    ),
+    out: Path = typer.Option(..., "--out", help="Output audit JSON report."),
+    max_transitions: int = typer.Option(100_000, "--max-transitions"),
+    max_games: int = typer.Option(96, "--max-games"),
+    seed: int = typer.Option(20260709, "--seed"),
+    batch_size: int = typer.Option(128, "--batch-size"),
+    seq_length: int = typer.Option(32, "--seq-length"),
+    wandb_project: str = typer.Option("learn-nethack", "--wandb-project"),
+    wandb_run_name: str | None = typer.Option(None, "--wandb-run-name"),
+) -> None:
+    """Audit frame-derived movement labels against true NLD keypresses."""
+    db_report = inspect_nld_db(db)
+    manifest = load_action_manifest(action_manifest)
+    game_metadata = read_game_metadata(db)
+    gameids = stratified_audit_gameids(
+        game_metadata,
+        max_games=max_games,
+        seed=seed,
+    )
+    progress_path = out.parent / "progress.jsonl"
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text("", encoding="utf-8")
+
+    def _write_progress(event: dict[str, object]) -> None:
+        line = json.dumps(event, sort_keys=True)
+        with progress_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        typer.echo(line, err=True)
+
+    transitions = (
+        transition
+        for batch in iter_nld_ttyrec_batches(
+            dataset_name=db_report.dataset_name,
+            batch_size=batch_size,
+            seq_length=seq_length,
+            dbfilename=str(db),
+            gameids=gameids,
+            shuffle=False,
+            loop_forever=False,
+        )
+        for transition in normalize_decoded_batch(batch)
+    )
+    report = build_pseudo_label_audit_report(
+        transitions=transitions,
+        action_manifest=manifest,
+        game_metadata_by_id=game_metadata,
+        max_transitions=max_transitions,
+        progress_callback=_write_progress,
+    )
+    report["input"] = {
+        "db_path": str(db),
+        "dataset_name": db_report.dataset_name,
+        "action_manifest_path": str(action_manifest),
+        "batch_size": batch_size,
+        "seq_length": seq_length,
+        "progress_path": str(progress_path),
+        "selected_game_count": len(gameids),
+        "selected_gameids": gameids,
+        "seed": seed,
+    }
+    write_pseudo_label_audit_report(out, report)
+    wandb_report = log_pseudo_label_audit_to_wandb(
+        report_path=out,
+        report=report,
+        config={
+            "dataset_name": db_report.dataset_name,
+            "db_path": str(db),
+            "action_manifest_path": str(action_manifest),
+            "max_transitions": max_transitions,
+            "max_games": max_games,
+            "seed": seed,
+            "batch_size": batch_size,
+            "seq_length": seq_length,
+        },
+        project=wandb_project,
+        run_name=wandb_run_name,
+    )
+    typer.echo(json.dumps({**report, "wandb": wandb_report}, indent=2, sort_keys=True))
+
+
+@data_app.command("build-overfit-fixture")
+def build_overfit_fixture(
+    source_dir: Path = typer.Option(
+        ...,
+        "--source-dir",
+        help="Existing SFT dataset containing task-specific train JSONL files.",
+    ),
+    out: Path = typer.Option(..., "--out", help="Output fixture directory."),
+    rows_per_task: int = typer.Option(4, "--rows-per-task"),
+) -> None:
+    """Build a balanced tiny dataset for real-tokenizer overfit tests."""
+    report = build_sft_overfit_fixture(
+        source_dir=source_dir,
+        output_dir=out,
+        rows_per_task=rows_per_task,
+    )
+    typer.echo(json.dumps(report, indent=2, sort_keys=True))
+
+
+@data_app.command("audit-sft")
+def audit_sft(
+    dataset_dir: Path = typer.Option(
+        ...,
+        "--dataset-dir",
+        help="Completed SFT dataset directory.",
+    ),
+    out: Path | None = typer.Option(None, "--out", help="Output integrity report."),
+    expected_env_id: str = typer.Option(
+        "NetHackChallenge-v0",
+        "--expected-env-id",
+    ),
+    wandb_project: str = typer.Option("learn-nethack", "--wandb-project"),
+    wandb_run_name: str | None = typer.Option(None, "--wandb-run-name"),
+) -> None:
+    """Prove split, action-label, and dynamics-conditioning integrity."""
+    report_path = out or dataset_dir / "integrity_report.json"
+    report = audit_sft_dataset(dataset_dir, expected_env_id=expected_env_id)
+    write_sft_integrity_report(report_path, report)
+    wandb_report = log_sft_integrity_to_wandb(
+        report_path=report_path,
+        report=report,
+        config={
+            "dataset_dir": str(dataset_dir),
+            "expected_env_id": expected_env_id,
+        },
+        project=wandb_project,
+        run_name=wandb_run_name,
+    )
+    typer.echo(json.dumps({**report, "wandb": wandb_report}, indent=2, sort_keys=True))
+    if not report["passed"]:
+        raise typer.Exit(code=1)
+
+
 @wandb_app.command("status")
 def wandb_status(
     root: Path = typer.Option(Path("."), "--root", help="Repository root to inspect."),
@@ -223,6 +440,33 @@ def wandb_status(
     """Report local W&B offline runs and upload readiness."""
     report = build_wandb_visibility_report(root=root)
     typer.echo(json.dumps(report, indent=2, sort_keys=True))
+
+
+@wandb_app.command("log-pseudo-audit")
+def log_existing_pseudo_audit(
+    report_path: Path = typer.Option(
+        ...,
+        "--report",
+        help="Existing local pseudo-label audit report to mirror.",
+    ),
+    wandb_project: str = typer.Option("learn-nethack", "--wandb-project"),
+    wandb_run_name: str | None = typer.Option(None, "--wandb-run-name"),
+) -> None:
+    """Retry W&B mirroring without decoding the NLD corpus again."""
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("schema_version") != "learn-nethack.pseudo-label-audit.v1":
+        raise typer.BadParameter("report is not a pseudo-label audit v1 artifact")
+    config = report.get("input")
+    if not isinstance(config, dict):
+        config = {}
+    wandb_report = log_pseudo_label_audit_to_wandb(
+        report_path=report_path,
+        report=report,
+        config=config,
+        project=wandb_project,
+        run_name=wandb_run_name,
+    )
+    typer.echo(json.dumps(wandb_report, indent=2, sort_keys=True))
 
 
 @dashboard_app.command("build")

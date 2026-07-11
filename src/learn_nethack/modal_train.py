@@ -60,14 +60,20 @@ from learn_nethack.sft_eval import (
     evaluate_policy_rows_with_policy,
     summarize_next_frame_sequence_rows,
 )
+from learn_nethack.sft_integrity import (
+    SFT_INTEGRITY_SCHEMA_VERSION,
+    audit_sft_dataset,
+)
 from learn_nethack.sft_train import (
     SftTrainConfig,
     build_sft_jsonl_curriculum_plan,
     build_sft_jsonl_training_plan,
     configure_training_runtime,
     create_unsloth_sft_trainer_from_jsonl,
+    get_trainer_assistant_mask_report,
     load_jsonl_rows,
     resolve_jsonl_training_config,
+    summarize_trainer_loss_history,
 )
 from learn_nethack.modal_upload import safe_extract_tar_shard
 from learn_nethack.wandb_logging import log_sft_build_to_wandb
@@ -233,6 +239,40 @@ def _wandb_run_report(run: Any, mode: str) -> dict[str, Any]:
     }
 
 
+def _assistant_mask_wandb_metrics(
+    report: Mapping[str, Any],
+    *,
+    prefix: str,
+) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    scalar_keys = (
+        "row_count",
+        "input_token_count",
+        "prompt_token_count",
+        "masked_prompt_token_count",
+        "assistant_token_count",
+        "supervised_assistant_token_count",
+        "assistant_tokens_truncated",
+        "truncated_token_count",
+        "rows_with_truncated_assistant",
+        "supervised_token_fraction",
+    )
+    for key in scalar_keys:
+        value = report.get(key)
+        if isinstance(value, int | float):
+            metrics[f"{prefix}/{key}"] = float(value)
+    per_task = report.get("per_task")
+    if isinstance(per_task, Mapping):
+        for task, task_report in per_task.items():
+            if not isinstance(task_report, Mapping):
+                continue
+            for key in scalar_keys:
+                value = task_report.get(key)
+                if isinstance(value, int | float):
+                    metrics[f"{prefix}/{task}/{key}"] = float(value)
+    return metrics
+
+
 def _write_report(report: dict) -> Path:
     return _write_json(report["artifact_layout"]["report"], report)
 
@@ -394,6 +434,7 @@ def local_sft_train_contract(
             "max_steps": max_steps,
             "max_steps_mode": ("auto_one_full_pass" if max_steps <= 0 else "explicit"),
             "trainer": "unsloth_trl_sft",
+            "loss_mask": "explicit_final_assistant_tokens",
             "output_contract": '{"action_id": <int>}',
             "auxiliary_task": "raw rendered next-frame text",
         },
@@ -442,6 +483,7 @@ def local_sft_train_existing_contract(
             "max_steps_mode": ("auto_one_full_pass" if max_steps <= 0 else "explicit"),
             "training_objective": training_objective,
             "trainer": "unsloth_trl_sft",
+            "loss_mask": "explicit_final_assistant_tokens",
             "output_contract": '{"action_id": <int>}',
             "auxiliary_task": "raw rendered next-frame text",
         },
@@ -1023,6 +1065,7 @@ def _sft_train_impl(
         hf_cache_committed_after_model_load = _commit_mounted_volume(
             HF_CACHE_MOUNT_PATH
         )
+    assistant_mask_report = get_trainer_assistant_mask_report(trainer)
     configure_training_runtime(train_config)
     train_output = trainer.train()
     trainer.model.save_pretrained(contract["artifacts"]["adapter"])
@@ -1030,7 +1073,7 @@ def _sft_train_impl(
     if processing_class is not None:
         processing_class.save_pretrained(contract["artifacts"]["adapter"])
     report = {
-        "schema_version": "learn-nethack.sft-train-report.v1",
+        "schema_version": "learn-nethack.sft-train-report.v2",
         "run_id": run_id,
         "status": "completed",
         "contract_path": str(contract_path),
@@ -1041,6 +1084,7 @@ def _sft_train_impl(
         "build_wandb_mode": build_wandb_mode,
         "build_result": build_result.__dict__,
         "training_plan": train_plan,
+        "assistant_mask": assistant_mask_report,
         "train_metrics": getattr(train_output, "metrics", {}),
         "hf_cache": {
             "mount_path": HF_CACHE_MOUNT_PATH,
@@ -1065,6 +1109,10 @@ def _sft_train_impl(
             "sft_train/accepted_policy_rows": build_result.accepted_policy_rows,
             "sft_train/accepted_next_frame_rows": build_result.accepted_next_frame_rows,
             "sft_train/rejected_rows": build_result.rejected_rows,
+            **_assistant_mask_wandb_metrics(
+                assistant_mask_report,
+                prefix="sft_train/assistant_mask",
+            ),
         }
     )
     adapter_artifact = wandb.Artifact(name=f"sft-adapter-{run_id}", type="model")
@@ -1176,6 +1224,11 @@ def _sft_train_existing_impl(
         model = trainer.model
         tokenizer = getattr(trainer, "processing_class", tokenizer)
         phase_metrics = getattr(train_output, "metrics", {})
+        assistant_mask_report = get_trainer_assistant_mask_report(trainer)
+        trainer_state = getattr(trainer, "state", None)
+        loss_history = summarize_trainer_loss_history(
+            getattr(trainer_state, "log_history", [])
+        )
         phase_reports.append(
             {
                 "name": phase_name,
@@ -1183,6 +1236,8 @@ def _sft_train_existing_impl(
                 "train_files": list(phase["train_files"]),
                 "row_count": phase.get("row_count"),
                 "tasks": phase.get("tasks"),
+                "assistant_mask": assistant_mask_report,
+                "loss_history": loss_history,
                 "metrics": phase_metrics,
             }
         )
@@ -1193,6 +1248,19 @@ def _sft_train_existing_impl(
                 if isinstance(value, int | float)
             }
         )
+        run.log(
+            _assistant_mask_wandb_metrics(
+                assistant_mask_report,
+                prefix=f"sft_train_existing/{phase_name}/assistant_mask",
+            )
+        )
+        run.log(
+            {
+                f"sft_train_existing/{phase_name}/overfit/{key}": float(value)
+                for key, value in loss_history.items()
+                if isinstance(value, int | float | bool)
+            }
+        )
     if trainer is None:
         raise RuntimeError("SFT training produced no trainer")
     trainer.model.save_pretrained(contract["artifacts"]["adapter"])
@@ -1200,7 +1268,7 @@ def _sft_train_existing_impl(
     if processing_class is not None:
         processing_class.save_pretrained(contract["artifacts"]["adapter"])
     report = {
-        "schema_version": "learn-nethack.sft-train-existing-report.v1",
+        "schema_version": "learn-nethack.sft-train-existing-report.v2",
         "run_id": run_id,
         "status": "completed",
         "contract_path": str(contract_path),
@@ -1226,6 +1294,7 @@ def _sft_train_existing_impl(
     for optional_path in (
         dataset_summary.get("manifest_path"),
         dataset_summary.get("rejection_report_path"),
+        dataset_summary.get("integrity_report_path"),
     ):
         if optional_path and Path(str(optional_path)).exists():
             adapter_artifact.add_file(str(optional_path))
@@ -1256,6 +1325,54 @@ def _existing_sft_dataset_summary(dataset_dir: Path) -> dict[str, Any]:
         "rejection_report_path": str(rejection_report_path),
     }
     summary["manifest"] = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = summary["manifest"]
+    if (
+        isinstance(manifest, Mapping)
+        and manifest.get("split_row_limits") is not None
+        and manifest.get("split_limits_satisfied") is not True
+    ):
+        raise RuntimeError(
+            f"SFT dataset split row limits are incomplete: {manifest_path}"
+        )
+    if isinstance(manifest, Mapping) and manifest.get("split_row_limits") is not None:
+        integrity_report_path = dataset_dir / "integrity_report.json"
+        if not integrity_report_path.exists():
+            raise FileNotFoundError(
+                "required corrected-dataset integrity report is missing: "
+                f"{integrity_report_path}"
+            )
+        recorded_integrity = json.loads(
+            integrity_report_path.read_text(encoding="utf-8")
+        )
+        if not isinstance(recorded_integrity, Mapping) or (
+            recorded_integrity.get("passed") is not True
+        ):
+            raise RuntimeError(
+                "recorded SFT dataset integrity audit did not pass: "
+                f"{integrity_report_path}"
+            )
+        if recorded_integrity.get("schema_version") != SFT_INTEGRITY_SCHEMA_VERSION:
+            raise RuntimeError(
+                "recorded SFT dataset integrity schema is obsolete: "
+                f"{recorded_integrity.get('schema_version')!r}"
+            )
+        live_integrity = audit_sft_dataset(
+            dataset_dir,
+            expected_env_id=str(manifest.get("env_id")),
+        )
+        if live_integrity.get("passed") is not True:
+            raise RuntimeError(
+                "live SFT dataset integrity audit failed: "
+                f"{live_integrity.get('failure_reasons')}"
+            )
+        if recorded_integrity.get("file_fingerprints") != live_integrity.get(
+            "file_fingerprints"
+        ):
+            raise RuntimeError(
+                "SFT dataset files changed after the recorded integrity audit"
+            )
+        summary["integrity_report_path"] = str(integrity_report_path)
+        summary["integrity_report"] = live_integrity
     summary["rejection_report"] = json.loads(
         rejection_report_path.read_text(encoding="utf-8")
     )
@@ -2211,8 +2328,20 @@ def _readiness_impl(run_id: str) -> dict:
         config=report,
         dir=report["artifact_layout"]["wandb"],
     )
+    artifact_name = f"modal-readiness-{run_id}"
+    report["wandb"].update(_wandb_run_report(wandb_run, report["wandb"]["mode"]))
+    report["wandb"]["artifact_name"] = artifact_name
+    report["hf_cache"] = {
+        "mount_path": HF_CACHE_MOUNT_PATH,
+        "volume_name": modal_volume_mounts()[HF_CACHE_MOUNT_PATH],
+    }
+    report_path = _write_report(report)
     wandb_run.log({"modal/readiness": 1})
+    readiness_artifact = wandb.Artifact(name=artifact_name, type="evaluation")
+    readiness_artifact.add_file(str(report_path))
+    wandb_run.log_artifact(readiness_artifact)
     wandb_run.finish()
+    _commit_mounted_volume("/runs")
 
     report["report_path"] = str(report_path)
     return report

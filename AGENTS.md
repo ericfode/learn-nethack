@@ -1,584 +1,374 @@
 # AGENTS.md
 
-Repository instructions for coding agents working in `/Users/ericfode/Documents/learn-nethack`.
+Repository instructions for coding and research agents working in
+`/Users/ericfode/Documents/learn-nethack`.
 
-This file is project-local guidance. User messages and nearer nested `AGENTS.md`
-files override it.
+User messages and nearer nested `AGENTS.md` files override this file.
 
-## Interpretive Rule
+## Operating Principle
 
-Complete tasks in the user's intended sense, not the narrowest literal reading.
-When a request has an easy interpretation and a harder interpretation, assume
-the harder interpretation is meant if it better advances the project goal.
+Complete work in the user's intended sense, not the easiest literal sense. If
+one interpretation merely exercises plumbing and another tests the actual
+research claim, assume the latter is intended.
 
-Do not hide behind literal wording to avoid the real work. Infer intent from
-the project purpose, recent context, existing plans, and durable constraints.
-Ask only when the inferred harder task would be materially risky: destructive
-data changes, credential exposure, large cloud spend, irreversible external
-state, or a design fork that would be expensive to unwind.
+Be autonomous. Recover state, close uncertainty with evidence, execute the
+smallest meaningful increment, run the strongest relevant gate, and record the
+result durably. Ask only when the unresolved choice risks destructive data
+changes, credential exposure, substantial cloud spend, or an expensive design
+fork.
 
-## Project Purpose
+Do not confuse activity with evidence. A wired pipeline, falling training loss,
+or a watchable rollout is not proof that NetHack play improved.
 
-Build a reproducible NetHack learning pipeline:
+## Current Objective
 
-- Convert local NLD/NLE traces into supervised fine-tuning data.
-- Fine-tune a small Gemma 4 text model with Unsloth on Modal.
-- Teach the model to emit valid NLE discrete actions from NetHack observations.
-- Also teach the model a supervised dynamics task: given a NetHack observation
-  and action, predict the following terminal frame/observation.
-- Evaluate dynamics as next-1/5/10 frame sequence prediction conditioned on
-  1/5/10 replay actions, not only as isolated one-step prediction.
-- Evaluate policy quality as action sequences that maximize NLE reward/score
-  while minimizing observed HP damage, deaths, and stuck/non-advancing steps.
-- Compare single-frame prompts with growing-context prompts.
-- Run a first bounded NLE reinforcement-learning smoke loop.
-- Make every RL/eval rollout watchable and auditable through terminal frames,
-  tty recordings, replay media, metrics, and local reports.
+Produce a Gemma 4 checkpoint that improves live NetHack play relative to both
+frozen base Gemma and the existing 20k checkpoint.
 
-```mermaid
-flowchart LR
-  D["Local NLD/NLE data<br/>outside git"] --> B["Dataset builder"]
-  B --> S1["single_frame SFT JSONL"]
-  B --> S2["growing_context SFT JSONL"]
-  B --> F["next-frame SFT JSONL"]
-  S1 --> M["Modal + Unsloth multi-task SFT"]
-  S2 --> M
-  F --> M
-  M --> A["LoRA adapter"]
-  A --> E["Validity eval"]
-  A --> R["NLE RL smoke"]
-  R --> W["watch UI"]
-  R --> T["ttyrec + replay media"]
-  E --> L["local reports + W&B"]
-  T --> L
-```
+The active execution plan is:
 
-## Non-Negotiable Rules
+`docs/superpowers/plans/2026-07-09-full-data-training-proof-next-steps.md`
 
-- Do not commit raw NetHack data, ttyrec corpora, checkpoints, Modal cache
-  volumes, W&B credentials, Hugging Face tokens, or generated run artifacts.
-- Treat NLE as the environment authority. Do not hand-roll NetHack legality.
-- The v1 model output contract is exactly JSON: `{"action_id": <int>}`.
-- That contract applies to policy prompts. Auxiliary next-frame prompts must be
-  explicitly tagged as a different task and must not be used for RL action
-  selection.
-- RL actors must use constrained candidate-action scoring over valid NLE action
-  IDs. Do not drive RL rollouts with unconstrained free-text generation.
-- Every eval/RL episode must produce an inspectable trace: terminal frames,
-  action IDs, rewards, done/death status, and at least one replay artifact.
-- W&B must always work. `wandb` is a core dependency, not an optional reporting
-  extra. Every SFT/eval/RL run must create a W&B run in online mode when
-  credentials/network are available, or in `WANDB_MODE=offline` otherwise.
-- W&B is a mirror and analysis surface, not the only ledger. Always write local
-  JSON reports before or alongside mandatory W&B logging.
+The required order is:
 
-## Known Failure Modes From Prior Work
-
-Prior NetHack/NLE attempts failed in predictable ways. Treat these as design
-constraints, not as background trivia.
-
-- Do not equate valid actions with competent play. Valid action prediction is a
-  first contract test; survival, score, depth, role robustness, and recovery
-  from bad state are separate metrics.
-- Do not expect end-to-end RL or behavior cloning to discover NetHack strategy
-  unaided. Prior neural agents lagged symbolic and hybrid agents because
-  NetHack needs hierarchy, long-term memory, explicit state tracking, and
-  domain strategies.
-- Do not average away role failures. Report metrics by role/race/alignment when
-  available, and call out weak roles explicitly. Aggregate scores can hide
-  collapse on Tourist, Healer, Rogue, or Wizard-like starts.
-- Do not ignore starvation. Agents that camp safe top-level areas can score
-  acceptably for a while and still die from hunger. Track hunger/nutrition
-  events, food pickup/eat decisions, and starvation deaths.
-- Do not let menus become silent progress sinks. Track contiguous keypresses
-  that fail to advance game time, open-menu state, popup prompts, and aborted
-  menus. RL rollouts must terminate or recover from stuck-menu loops.
-- Do not rely on raw current-frame text alone for serious play. Keep the
-  single-frame path as a baseline, but preserve interfaces for memory, event
-  history, inventory state, known map state, and hierarchical skills/options.
-- Do not assume scaling data/model size solves the game. Scaling imitation
-  learning helps, but prior work indicates hierarchy and RL correction still
-  matter.
-- Do not train only on final score. Log exact-match action metrics, survival
-  metrics, progress metrics, invalid/stuck-action metrics, death causes, and
-  per-episode traces.
-- Do not claim full-game competence from smoke runs. A two-episode RL smoke
-  proves plumbing only.
-
-```mermaid
-flowchart TD
-  V["valid JSON action"] --> P["NLE action accepted"]
-  P --> S["survives menus and prompts"]
-  S --> H["handles hunger, combat, inventory"]
-  H --> G["role-robust progress"]
-  G --> A["long-horizon strategy"]
-
-  V -. "necessary, not sufficient" .-> A
-```
-
-## BALROG Boundary
-
-BALROG is useful as a benchmark and source of implementation ideas. It is not
-the core RL training framework for this repository.
-
-- Keep `src/learn_nethack/rl_loop.py` native and training-oriented: constrained
-  candidate-action scoring, sampled discrete `action_id`, REINFORCE/KL loss,
-  LoRA optimizer step, watcher events, ttyrec artifacts, and W&B logging.
-- Do not replace the training loop with BALROG's evaluator. BALROG agents wrap
-  LLM/API clients, emit string actions, and write evaluation trajectories; that
-  is not the same contract as gradient updates over scored JSON action IDs.
-- Borrow BALROG ideas deliberately: language observation rendering,
-  no-progress timeouts, invalid-action feedback as an eval diagnostic,
-  trajectory CSV/JSON shape, NLE progress stats, and render helpers.
-- Post-training BALROG evaluation is allowed after a completed SFT or RL run,
-  but only through an adapter that preserves this repo's JSON `action_id`
-  policy internally and maps selected actions to BALROG string actions at the
-  boundary.
-- A BALROG eval must first verify an explicit action-map manifest. If the
-  trained NLE action IDs cannot be mapped to BALROG's action strings for the
-  selected environment, fail before running episodes.
-- BALROG evals must produce the same local report and W&B run guarantees as
-  native evals, including trajectory artifacts when BALROG writes them.
-- If BALROG is used, use it as an optional external evaluation harness in a
-  separate environment or optional dependency group. Do not add `balrog`,
-  `gym==0.23`, forked MiniHack/TextWorld/Baba dependencies, or BALROG post-
-  install steps to the core trainer dependency path.
-- Never use BALROG's `SECRETS` file pattern in this repo. Secrets stay in Modal
-  Secrets or process environment only.
+1. Prove assistant-only loss, game-disjoint splits, true-label integrity, and
+   online W&B plus local-ledger reporting.
+2. Run matched corrected-20k experiments for single-frame and growing-context
+   policy training, then dynamics and phased variants.
+3. Promote a recipe only if offline metrics and at least 16 paired live NLE
+   seeds pass the current proof gate.
+4. Scale to the full corpus only after the corrected-20k gate passes.
+5. Compare the promoted checkpoint under matched external benchmark protocols
+   and continue until the learned-agent competitive gate passes.
 
 ```mermaid
 flowchart LR
-  A["Gemma adapter"] --> N["native RL loop"]
-  N --> U["LoRA update"]
-  N --> W["W&B + ttyrec + watcher"]
-
-  A -. "optional later" .-> B["BALROG eval harness"]
-  B -. "benchmark reports only" .-> R["external results"]
+  I["Integrity proof"] --> C["Matched corrected 20k"]
+  C --> O["Offline policy and dynamics gate"]
+  O --> L["16-seed live v7 gate"]
+  L --> F["Full-corpus scale"]
+  F --> R["Bounded RL"]
+  R --> B["Matched external benchmarks"]
+  C -. "failure" .-> D["Diagnose and pre-register next experiment"]
+  O -. "failure" .-> D
+  L -. "failure" .-> D
 ```
 
-## Expected Repository Shape
+Dynamics improvement alone does not complete the objective. Infrastructure
+proof alone does not justify scaling.
 
-Use this shape unless a later implementation plan changes it deliberately:
+## Authority And Legacy Evidence
 
-```text
-src/learn_nethack/
-  actions.py          NLE action discovery and validation
-  observations.py     deterministic observation-to-text rendering
-  sft_data.py         NLD ingestion and SFT JSONL generation
-  eval_validity.py    parse/action-space/movement validity metrics
-  ttyrec.py           ttyrec and replay-media writing
-  wandb_logging.py    mandatory W&B metrics, tables, media, artifacts
-  watch_server.py     Modal-hosted rollout viewer
-  modal_train.py      Modal entrypoints for SFT/eval/RL
-  rl_loop.py          bounded NLE RL smoke loop
-tests/
-  test_*.py           fast unit tests
-  integration/        optional NLE/data/Modal integration tests
-artifacts/            generated local outputs, ignored by git
-docs/superpowers/     plans and durable workflow notes
-```
+Use this authority order:
 
-Prefer small files with one owner. If a module grows past roughly 500 lines,
-split by responsibility before adding more behavior.
+1. The latest user instruction and active goal.
+2. Checked-in source, tests, benchmark registry, and the active execution plan.
+3. A completed local or Modal report that satisfies the admissibility contract
+   below.
+4. W&B and dashboards as mirrors of those reports.
+5. Older generated artifacts as historical diagnostics only.
 
-## Data And Artifact Boundaries
+`artifacts/` contains output from many earlier agents and experimental
+contracts. Directory names such as `trained`, `full`, `comparison`, `proof`, or
+`watch` are not evidence. Never infer current state from a filename or from the
+existence of a checkpoint.
 
-- Local source data is expected under `/Users/ericfode/data`, especially:
-  - `/Users/ericfode/data/nld/nld-aa-taster`
-  - `/Users/ericfode/data/nld/history`
-  - `/Users/ericfode/data/nld-jepa`
-- Read those paths only as inputs. Do not modify or reorganize them without an
-  explicit user request.
-- Store generated local smoke outputs under repo-local `artifacts/` and ensure
-  `artifacts/` is ignored by git.
-- Store long-running Modal outputs in named Modal volumes, not in the git tree.
-- Keep small schemas, manifests, and sample fixtures in git only when they are
-  deterministic and safe to review.
+An experimental result is admissible only when its report records:
 
-## Action And Observation Contract
+- schema version and run ID;
+- git commit or explicit dirty-tree state;
+- model and exact checkpoint identity;
+- dataset manifest and file fingerprints;
+- environment ID and action-manifest identity;
+- split seed, rollout seeds, step budget, and role/character settings;
+- metric and fitness-objective versions;
+- W&B mode, run ID, URL, and artifact names;
+- required local events, reports, ttyrecs, and replay media;
+- completion status and failure counters.
 
-The action stack has three layers:
+Comparisons additionally require matched environment, action space, model,
+dataset split, seeds, step budget, generation/scoring procedure, and metric
+version. If any differ, label the comparison exploratory and do not use it for
+promotion.
 
-1. Output validity: assistant text parses as JSON with an integer `action_id`.
-2. NLE validity: `action_id` is in the active environment action space.
-3. Map sanity: movement actions do not target obviously blocked rendered tiles
-   when the observation exposes enough map information.
+Known historical artifacts using pseudo movement labels, obsolete
+`live_rollout_utility_v2` or `v3`, fewer than 16 seeds, base-vs-base runs,
+Gemma E2b, or a `NetHack-v0`/121-action mismatch are not current baselines.
+Preserve them for diagnosis, but rerun the relevant baseline under the current
+contract.
 
-Layer 1 and layer 2 are hard gates. Layer 3 is a metric unless NLE exposes a
-stronger legality surface.
+Do not create a second module or report format merely because an older one is
+awkward. Patch the current owner unless a clean ownership split is necessary.
 
-For SFT rows, use standard chat roles:
+## Fixed Experiment Contract
 
-```json
-{
-  "messages": [
-    {"role": "system", "content": "You control NetHack through NLE. Return only JSON: {\"action_id\": int}."},
-    {"role": "user", "content": "Allowed action_ids: [0,1,2]\nCurrent observation:\n..."},
-    {"role": "assistant", "content": "{\"action_id\": 1}"}
-  ],
-  "metadata": {
-    "mode": "single_frame",
-    "target_action_id": 1,
-    "valid_action_ids": [0, 1, 2]
-  }
-}
-```
+The corrected proof lane uses:
 
-Do not train on hidden chain-of-thought. Keep prompts and labels auditable.
+- environment: `NetHackChallenge-v0`;
+- action manifest: the exact 121-action manifest for that environment;
+- primary model: `google/gemma-4-E4b-it`;
+- policy output: exactly `{"action_id": <int>}`;
+- live objective: `live_rollout_utility_v7`;
+- proof seeds: at least the 16 fixed seeds in `modal_config.py`;
+- external targets: `benchmarks/nethack_benchmarks.json`.
 
-Auxiliary next-frame rows are allowed and expected. They must use a different
-task tag in the system/user prompt, include the selected action, and train the
-assistant to predict the next rendered observation. Do not mix next-frame fields
-into the policy action JSON; candidate-action scoring must remain over exact
-`{"action_id": N}` strings.
+Changing the environment, action space, model size, fitness version, or seed
+set starts a new comparison family. It requires new matched base and current-20k
+baselines. Do not silently migrate an existing run.
 
-## Modal, Secrets, And W&B
+Treat NLE as the environment authority. Before a rollout, require the manifest
+environment ID and exact action IDs to match `env.unwrapped.actions`. Candidate
+scoring may consider only those action IDs. Never pass an ID valid only in the
+manifest to a smaller live action space.
 
-- Use Modal for GPU work. Keep local commands limited to data inspection, unit
-  tests, schema validation, and small dataset builds.
-- Use Modal when the current lane is Modal readiness, training, eval, RL,
-  watcher deployment, or GPU dependency validation. Do not downgrade Modal work
-  to local-only checks merely to avoid network or dependency churn.
-- Use Modal Secrets for `HF_TOKEN`, `WANDB_API_KEY`, and any watch auth token.
-  Never place secrets in code, tests, fixtures, configs, or docs.
-- Modal training/eval/RL entrypoints must fail fast if `WANDB_API_KEY` is
-  absent and online logging is requested. They may run with `WANDB_MODE=offline`
-  only when the command explicitly sets offline mode for a smoke or test run.
-- Use Modal volumes for datasets, runs, Hugging Face cache, and watcher state.
-- W&B logging should include:
-  - config: model, dataset, context mode, seed, GPU, LoRA settings
-  - SFT metrics: action loss, next-frame loss, combined loss, learning rate,
-    grad norm, tokens/sec, examples/sec
-  - eval metrics: parse validity, action-space validity, exact match, block rate
-  - next-frame eval metrics: frame character accuracy, map line exact rate,
-    message exact rate, blstats numeric error when available, and
-    autoregressive next-1/5/10 frame sequence accuracy conditioned on replay
-    action sequences
-  - RL/watch metrics: reward, score/depth when available, observed HP damage,
-    death/done status, episode length, policy loss, entropy, action histogram
-  - artifacts: adapter, dataset manifest, eval report, RL report
-  - media: rendered replay video or GIF
-  - raw replay: `.ttyrec` files as artifacts
+## Data Contract
 
-## Watchability Requirement
+Source data is read-only and lives outside git, primarily under:
 
-Every RL or eval environment run must be watchable by a user.
+- `/Users/ericfode/data/nld/nld-aa-taster`
+- `/Users/ericfode/data/nld/history`
+- `/Users/ericfode/data/nld-jepa`
 
-Minimum viewer state per step:
+Generated local output belongs under ignored `artifacts/`. Modal datasets,
+checkpoints, caches, run reports, ttyrecs, and replay media belong in named
+Modal volumes. Never commit raw NLD data, ttyrecs, checkpoints, generated
+media, W&B state, or credentials.
 
-- terminal frame
-- step index
-- selected action ID and optional action label
-- reward
-- cumulative reward
-- HP, depth, and visible message when available
-- invalid output/action counts
-- done/death status
-- hunger status when available
-- open-menu or prompt state when available
-- game-time advancement since the previous action
+Dataset requirements:
 
-The v1 watcher is read-only. Do not add interactive environment control unless
-the user asks for it.
+- split by `gameid` or `episode_id`, never row index;
+- no game or episode may occur in more than one split;
+- corrected-20k means 20,000 train, 2,000 validation, and 2,000 test rows per
+  requested task unless a newer plan explicitly changes the quota;
+- zero-byte validation or test files invalidate the dataset;
+- a capped build must record and satisfy per-split quotas;
+- every policy and dynamics row must retain the raw keypress and map it through
+  the active action manifest without coercion;
+- malformed, unmapped, ambiguous, or out-of-space labels are rejected with
+  reason codes;
+- sampling and splits are deterministic from a recorded seed.
 
-## Modal Watch-Compare Benchmark
+Before GPU training, require a passing `integrity_report.json` that proves row
+counts, game/episode disjointness, strict policy JSON, raw-key/action agreement,
+dynamics conditioning agreement, duplicate absence, action distribution, and
+file fingerprints. Recompute the audit after upload; a stale report is not
+sufficient.
 
-Use `src/learn_nethack/modal_train.py::watch_compare` when the user needs a
-watchable checkpoint-vs-baseline benchmark on Modal. This is the canonical path
-for comparing the current Gemma adapter against base Gemma 4 once training data
-and a checkpoint are ready.
+Pseudo labels may be used only for a separately named ablation. The current
+corrected lane uses true NLD keypresses. Visible-player-delta labels do not
+represent menu actions, inventory actions, waits, attacks without movement, or
+all player intent.
 
-Required inputs:
+## Training Contract
 
-- `artifacts/action_manifest.json` locally, uploaded to
-  `learn-nethack-datasets:/action_manifest.json`.
-- A trained adapter checkpoint in the runs volume, usually
-  `/runs/<train-run-id>/adapters`.
-- A benchmark `run_id` that names the data, checkpoint, env, and step budget.
+Policy rows and dynamics rows are different tasks. Do not mix next-frame fields
+into the policy JSON response.
 
-Base-vs-base runs are allowed only as plumbing smokes. They prove Modal, NLE,
-Gemma 4 download, candidate scoring, and watcher artifacts. They are not
-checkpoint benchmarks because `current_checkpoint` is `null`.
+Use standard chat roles. Supervise only the final assistant response:
 
-Default 10-step smoke:
+- tokenize the prompt with the model chat template;
+- tokenize the complete prompt plus assistant response;
+- verify the prompt tokens are an exact prefix;
+- set all prompt and padding labels to `-100`;
+- leave only final assistant tokens supervised;
+- fail if truncation removes every assistant token;
+- report prompt, masked, assistant, and truncated token counts by task.
 
-```bash
-modal volume put --force learn-nethack-datasets artifacts/action_manifest.json /action_manifest.json
-WANDB_MODE=offline modal run src/learn_nethack/modal_train.py::watch_compare \
-  --run-id gemma4-e2b-modal-watch-10 \
-  --action-manifest /datasets/action_manifest.json \
-  --env-id NetHack-v0 \
-  --model-name google/gemma-4-E2b-it \
-  --max-steps 10
-```
+The policy path scores exact candidate strings such as
+`{"action_id": 17}`. It does not use unconstrained free-text generation for
+live actions.
 
-Checkpoint benchmark when data and adapter are ready:
+The dynamics task is conditioned on the true action and predicts the actual
+next NLD-rendered observation. Syntax alone never proves that a generated frame
+is reachable. Ground truth is the NLD successor for the same transition.
 
-```bash
-modal volume put --force learn-nethack-datasets artifacts/action_manifest.json /action_manifest.json
-WANDB_MODE=offline modal run src/learn_nethack/modal_train.py::watch_compare \
-  --run-id <checkpoint-run-id>-watch-100 \
-  --action-manifest /datasets/action_manifest.json \
-  --current-checkpoint /runs/<checkpoint-run-id>/adapters \
-  --env-id NetHack-v0 \
-  --model-name google/gemma-4-E2b-it \
-  --max-steps 100
-```
+Cache Gemma model and tokenizer files in the
+`learn-nethack-hf-cache` Modal volume mounted at `/cache/huggingface`. A normal
+run must not redownload the model.
 
-If the local shell does not expose `modal`, use `uv run modal` with the same
-arguments. Keep `WANDB_MODE=offline` only for explicit smoke/test commands; use
-online W&B when credentials/network are available for real benchmark runs.
+## Evaluation And Promotion
 
-Benchmark outputs:
+Policy gates:
 
-- Modal watch volume: `/watch/<run_id>/events.jsonl`,
-  `/watch/<run_id>/latest.json`, `/watch/<run_id>/report.json`,
-  `/watch/<run_id>/index.html`.
-- Modal runs volume:
-  `/runs/<run_id>/reports/watch_compare_contract.json`.
-- Optional local mirror:
-  `artifacts/watch/<run_id>/events.jsonl`,
-  `artifacts/watch/<run_id>/report.json`,
-  `artifacts/watch/<run_id>/index.html`.
+- strict JSON validity: `1.0`;
+- live action-space validity: `1.0`;
+- useful-action accuracy improves over matched baselines;
+- predictions do not collapse to a dominant action;
+- results are broken down by role, race, and alignment where available.
 
-Fetch artifacts for review:
+Dynamics gates use autoregressive next-1/5/10 evaluation. Primary metrics are
+changed-map-cell precision/recall/F1, player-coordinate accuracy, BLSTATS field
+accuracy and numeric error, game-turn delta accuracy, and normalized message
+accuracy. Compare against copy-current and matched deterministic baselines.
+Raw character accuracy is diagnostic only.
 
-```bash
-modal volume get --force learn-nethack-watch /<run_id>/events.jsonl artifacts/watch/<run_id>/events.jsonl
-modal volume get --force learn-nethack-watch /<run_id>/report.json artifacts/watch/<run_id>/report.json
-modal volume get --force learn-nethack-watch /<run_id>/index.html artifacts/watch/<run_id>/index.html
-modal volume get --force learn-nethack-runs /<run_id>/reports/watch_compare_contract.json artifacts/watch/<run_id>/watch_compare_contract.json
-```
+Live promotion requires at least 16 paired-seed rollouts under
+`live_rollout_utility_v7`. Require score, reward, or depth progress without
+regression in:
 
-Use the benchmark report and event stream to compare current vs baseline action
-IDs, rewards, HP, depth, death/done state, visible messages, and stuck behavior.
-For handoff, summarize at least the first 10 steps and call out repeated
-wall-bumps, no-progress loops, menu traps, hunger/starvation messages, or death
-events. Do not claim checkpoint improvement from aggregate reward alone.
+- HP damage and deaths;
+- wall collisions;
+- menus, prompts, and stuck loops;
+- non-advancing actions;
+- action repetition;
+- hunger, fainting, and starvation;
+- role robustness.
 
-## Dynamics Ground Truth Validation
+Report confidence intervals and per-seed deltas. Aggregate reward alone cannot
+promote a checkpoint. A two-episode or ten-step run proves plumbing only.
 
-For next-frame/dynamics models, the LLM generates rendered state text. Validate
-that output in two layers:
+External benchmark numbers are comparable only under the benchmark's exact
+protocol. Do not compare an 80-step development rollout to a full-episode NLE
+score, or native NLE reward to BALROG progress. Refresh benchmark metadata
+before a campaign, then freeze it for that campaign.
 
-- Rendered-frame shape: required `MAP`, `MESSAGE`, `BLSTATS`, and `INVENTORY`
-  sections; a player glyph in the map; parseable numeric 27-field `BLSTATS`.
-- NLE ground truth: exact and section-level comparison against the real next
-  rendered observation from NLE or a `next_frame` dataset label.
+If a corrected-20k arm fails, record which hypothesis was falsified and run a
+new pre-registered experiment. Do not scale a failed recipe merely because the
+full corpus is available.
 
-Do not claim that arbitrary generated text is a reachable NetHack state from
-syntax alone. NetHack reachability depends on hidden state, RNG, inventory,
-monsters, timers, and action history. A generated frame is only validated as
-that step's state when it matches NLE-produced ground truth for the same
-observation/action transition.
+## W&B And Auditability
 
-Use the dynamics viewer's third panel for ground truth:
+W&B must always work, but it is a mirror rather than the only ledger.
 
-```bash
-nethack-gemma play dynamics \
-  --action-manifest artifacts/action_manifest.json \
-  --adapter-checkpoint /runs/<dynamics-run-id>/adapters \
-  --initial-row artifacts/sft/<dataset>/validation.next_frame.jsonl \
-  --ground-truth-rows artifacts/sft/<dataset>/validation.next_frame.jsonl \
-  --actions <comma-separated-action-ids> \
-  --out artifacts/watch/<run-id>
-```
+- Write the local or Modal JSON report before or alongside W&B logging.
+- Real build, train, eval, RL, and benchmark runs require online W&B and must
+  fail before expensive compute if `WANDB_API_KEY` is unavailable.
+- `WANDB_MODE=offline` is allowed only for explicitly named unit, smoke, or
+  local-development runs. Offline runs cannot satisfy a promotion gate.
+- Every real report records W&B mode, run ID, run URL, project, and artifacts.
+- Logging failure fails the run. Do not catch and suppress it.
 
-The resulting `events.jsonl` must include `predicted_frame`,
-`ground_truth_frame`, and `validation`. The `index.html` viewer must render
-Prompt, Predicted Next Frame, and Ground Truth Next Frame panels.
+Log configs, loss and throughput, gradient statistics, policy metrics,
+dynamics metrics, live guardrails, action histograms, role breakdowns, and
+failure counters. Upload dataset manifests, integrity reports, adapters, eval
+reports, terminal events, ttyrecs, and replay media as appropriate.
 
-```mermaid
-sequenceDiagram
-  participant User as Browser
-  participant Watch as watch_server.py
-  participant Store as Modal watch store
-  participant RL as RL worker
-  participant Env as NLE env
+Every live eval or RL episode must be watchable. At minimum preserve terminal
+frame, step, action ID/label, reward, cumulative reward, HP, depth, message,
+hunger, prompt/menu state, game-time advancement, invalid counts, and
+done/death status. The viewer is read-only unless the user explicitly requests
+control.
 
-  RL->>Env: step(action_id)
-  Env-->>RL: obs, reward, done
-  RL->>Store: append frame event
-  User->>Watch: open run URL
-  Watch->>Store: subscribe to run_id
-  Store-->>Watch: latest frame event
-  Watch-->>User: terminal frame and stats
-```
+## RL And BALROG Boundary
+
+Do not start RL because SFT loss fell. Begin bounded native RL only after the
+corrected SFT live gate passes.
+
+The native loop owns constrained action scoring, sampling, policy/KL loss,
+LoRA updates, NLE interaction, W&B, terminal events, ttyrecs, and replay media.
+NLE remains the transition and legality authority.
+
+BALROG is an optional post-training evaluation harness, not the training loop.
+Keep its dependencies isolated. An adapter must verify an explicit mapping from
+the internal JSON action IDs to BALROG actions before any episode starts.
+BALROG results require the same local-report and online-W&B guarantees.
+
+The local diffusion/world-model modules are exploratory sidecars. They may
+support representation or planning hypotheses, but they do not satisfy policy,
+dynamics, or gameplay promotion gates without matched held-out and live
+evidence.
+
+## Code Ownership
+
+Follow the current modules rather than an aspirational directory sketch:
+
+- `action_manifest.py`: environment action identity and raw-key mapping
+- `nld_decode.py`, `nld_metadata.py`: NLD decoding and game metadata
+- `sft_rows.py`, `sft_build.py`: supervised row construction and split quotas
+- `sft_integrity.py`: pre-training data admissibility
+- `sft_train.py`: tokenization, assistant masks, and trainer construction
+- `sft_eval.py`: policy/dynamics metrics and proof gates
+- `compare_watch.py`: matched live rollouts and replay artifacts
+- `modal_train.py`: cloud entrypoints and volume integration
+- `wandb_logging.py`: mandatory W&B mirrors for local workflows
+- `benchmark_registry.py`: frozen external targets and protocol boundaries
+- `local_world_model.py`, `world_model_*.py`: exploratory world-model lane
+
+Keep pure transforms in normal modules and Modal wrappers thin. Do not let
+`modal_train.py` become the only implementation of shared behavior. Split a
+module by responsibility before adding more behavior when it grows beyond
+roughly 500 lines.
 
 ## Coding Standards
 
-Use these standards for all repository code unless a narrower plan says
-otherwise.
+- Target Python 3.11.
+- Type public functions and module boundaries.
+- Prefer `dataclass(frozen=True)` for small immutable records and dictionaries
+  for JSON-shaped payloads.
+- Use `pathlib.Path`, deterministic JSON, and recorded seeds.
+- Separate parsing, validation, and I/O.
+- Put optional heavy imports inside the functions that need them.
+- Imports must not trigger network, Modal, Hugging Face, W&B, or GPU work.
+- Avoid global mutable state and hidden fallback behavior.
+- Fail closed with precise messages and reason codes.
+- Use `ValueError` for invalid inputs, `RuntimeError` for missing runtime
+  capabilities, and `KeyError` for missing manifest mappings.
+- Do not reformat or refactor unrelated files.
 
-### Python Style
+Tests should be fast and fixture-driven by default. Add the smallest regression
+test for a contract defect. Mark NLE, corpus, Modal, GPU, and network tests as
+integration tests and skip them with a precise prerequisite message when the
+dependency is absent.
 
-- Target Python 3.11. Do not rely on Python 3.12+ or 3.14-only features.
-- Use typed function signatures at module boundaries and for all public helper
-  functions. Keep internal locals readable; do not type-noise obvious code.
-- Prefer `dataclass(frozen=True)` for small immutable records and explicit
-  dictionaries only for JSON-shaped payloads.
-- Keep functions small and named after the contract they enforce. If a function
-  needs more than one screen to understand, split parsing, validation, and I/O.
-- Use `pathlib.Path` for filesystem paths.
-- Use `json.dumps(..., sort_keys=True)` for deterministic JSONL/report output
-  unless human-preserving key order is part of the artifact contract.
-- Avoid global mutable state. If a cache is needed, make its scope explicit and
-  test cache invalidation.
-- Do not add hidden network, Modal, Hugging Face, or W&B side effects at import
-  time. Imports must be safe in unit tests.
+Use `ruff format` and `ruff check`. Prefer exact schema/report assertions over
+large snapshots.
 
-### Module Boundaries
+## Workflow And Handoff
 
-- Keep pure transforms separate from I/O. Example: decode/normalize NLD batches
-  separately from writing SFT JSONL.
-- Put optional heavy imports inside the functions that need them:
-  `nle`, `torch`, `transformers`, `trl`, `unsloth`, `modal`, `wandb`, `fastapi`.
-- When an optional dependency is missing, raise or skip with a precise message
-  naming the dependency and command class that needs it.
-- Do not let Modal code become the source of truth for local behavior. Shared
-  schemas, action manifests, dataset builders, and metrics live in normal
-  modules and are imported by Modal entrypoints.
-- Keep BALROG integration isolated from core trainer modules.
+Start with:
 
-### Error Handling
+```bash
+git status --short --branch
+rg --files
+```
 
-- Fail before spending GPU/cloud time when required inputs, action manifests,
-  W&B configuration, or secrets are missing.
-- Reject malformed model outputs, unmapped raw keypresses, and out-of-space
-  action IDs explicitly. Do not coerce them into fallback actions.
-- Include reason codes in reports for rejected rows or failed episodes.
-- Prefer raising `ValueError` for invalid local inputs, `RuntimeError` for
-  missing runtime capabilities, and `KeyError` for missing manifest mappings.
+Then inspect before editing. Use `rg` for search and `apply_patch` for manual
+edits. Work with existing user changes and never revert unrelated work.
 
-### Data And Reports
-
-- Treat local JSON reports as durable contracts. Add `schema_version`, `run_id`,
-  input paths or source IDs, counts, and rejection/failure summaries.
-- Never write raw NLD data, checkpoint payloads, ttyrec corpora, or generated
-  media outside ignored artifact locations.
-- Keep fixture data tiny, deterministic, and safe to commit.
-- Sampling must be deterministic when given a seed. Record the seed in every
-  manifest/report that depends on sampling or splitting.
-- Episode splits must be by `gameid` or `episode_id`, never by row index.
-
-### Tests
-
-- Write fast unit tests for pure logic before integration tests: action
-  manifests, observation rendering, SFT row schema, split leakage, candidate
-  scoring math, W&B mode resolution, report generation.
-- Integration tests that require NLE, local corpora, Modal, GPU, or network
-  must be marked or skipped with a clear reason when prerequisites are absent.
-- Tests must not require the full `/Users/ericfode/data` corpus unless they are
-  explicitly integration tests.
-- Prefer exact assertions for schemas and reports. Avoid snapshot sprawl.
-- When a bug involves a regression in a contract, add the smallest fixture that
-  reproduces it.
-
-### Formatting And Tooling
-
-- Format Python with `ruff format` when the project config provides it. Use
-  `ruff check` for linting when available.
-- Keep imports sorted in the style `ruff` expects.
-- Do not reformat unrelated files.
-- Markdown plans and reports should use fenced code blocks for commands and
-  JSON, and should name absolute local paths when those paths are part of the
-  contract.
-
-## Development Workflow
-
-- Recover state first: `git status --short --branch`, then inspect files before
-  editing.
-- Use `rg` and `rg --files` for search.
-- Prefer test-driven increments for core contracts: actions, observations, SFT
-  schema, validity metrics, ttyrec writing, W&B dry-run logging.
-- Keep changes narrow. Do not mix dataset plumbing, Modal training, RL, and UI
-  watcher changes unless the current task requires the integration.
-- Add or update tests for changed behavior.
-- For Python changes, run the relevant `uv run pytest ...` gate before
-  finishing. Dependency sync, lockfile updates, package downloads, and local
-  `.uv-cache/` churn are allowed when they are caused by `uv run pytest` or
-  another explicit project gate.
-- Use fixture data in tests. Do not make tests depend on full local corpora
-  unless they are marked integration/optional.
-- Run the strongest relevant gate before finishing. If a relevant `uv` or
-  Modal gate is blocked by sandboxing, network, authentication, missing secrets,
-  or cloud prerequisites, request the needed approval or run it and state the
-  exact blocker.
-- Any training/eval report must include failure-mode counters: parse failures,
-  out-of-space actions, stuck-menu steps, non-advancing keypress streaks,
-  hunger/starvation events, death causes, role breakdown, score, depth, and
-  episode length.
-
-Recommended gates once the project is scaffolded:
+Relevant local gates:
 
 ```bash
 uv run pytest -q
-uv run pytest tests/test_actions.py tests/test_observations.py tests/test_sft_schema.py -q
-uv run pytest tests/test_ttyrec.py tests/test_wandb_logging.py -q
-WANDB_MODE=offline uv run pytest tests/test_wandb_logging.py -q
+uv run ruff check src tests
+uv run ruff format --check src tests
+git diff --check
 ```
 
-Modal and integration gates when the lane touches Modal, NLE data, GPU images,
-or remote reporting:
+Run Modal or NLE integration gates whenever the changed lane depends on them.
+A local import is not proof of cloud execution. A dry-run contract is not proof
+of training or evaluation.
 
-```bash
-uv run pytest tests/integration/test_nld_taster_build.py -q
-modal run src/learn_nethack/modal_train.py::readiness --run-id modal-readiness-smoke
-modal run src/learn_nethack/modal_train.py --help
-```
+Plans belong under `docs/superpowers/plans/`. Keep the active plan updated when
+evidence changes a decision. Do not copy transient terminal output into this
+file.
 
-## Review And Handoff
+Final handoffs name:
 
-- For implementation plans, save durable plans under
-  `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`.
-- Do not run `plannotator review` for this repository.
-- After a meaningful implementation diff exists, rely on focused tests,
-  relevant `uv run pytest` gates, relevant Modal smoke commands, and explicit
-  handoff notes for reviewability.
-- Final handoffs must name:
-  - files changed
-  - tests/gates run
-  - artifacts produced
-  - known residual risks
+- files changed;
+- tests and integration gates run;
+- durable artifacts and W&B URLs produced;
+- what is proven;
+- what remains unproven or risky;
+- the next promotion gate.
 
-## Research Notes
+## Research Constraints
 
-This AGENTS.md follows the current AGENTS.md convention: put build/test/style
-and project constraints in a predictable root file, keep it Markdown, and use
-nested files only when a subproject needs different rules.
+Preserve these lessons from prior NetHack work:
 
-Keep this file lean. Agent-context research indicates unnecessary repository
-instructions can increase cost and reduce task success. Add rules only when
-they prevent a repeated or high-cost failure.
+- valid actions are necessary but do not imply competent play;
+- hierarchy, memory, explicit state, feedback, and long-term credit assignment
+  remain major gaps for neural agents;
+- aggregate scores can hide role collapse;
+- top-level camping, starvation, wall loops, and menu traps can imitate short
+  term progress;
+- scaling imitation data alone has not closed the symbolic-agent gap;
+- structured terminal state should precede vision-only representations.
 
-NetHack-specific failure-mode sources to preserve:
+Primary references:
 
-- NLE is procedurally generated, stochastic, entity-rich, and explicitly hard
-  for current RL agents; use NLE as the authority and keep evaluation broad:
-  https://github.com/NetHack-LE/nle
-- The 2021 NetHack Challenge found symbolic agents far ahead of neural/deep RL
-  agents, with no entrant close to ascension; failures included role variance,
-  top-level camping, starvation, menu traps, missing hierarchy, and weak
-  long-term credit assignment:
-  https://ar5iv.labs.arxiv.org/html/2203.11889
-- The NLD dataset is large enough to be useful but not sufficient by itself;
-  prior work still found major algorithmic gaps for offline/online RL and
-  learning from demonstrations:
-  https://arxiv.org/abs/2211.00539
-- NetHack-specific neural policy studies found that hierarchy, architecture,
-  and RL fine-tuning help, but scaling alone does not close the gap to symbolic
-  agents or strong human play:
-  https://arxiv.org/abs/2305.19240
-- Zero-shot LLM NetHack agents benefited from predefined skills, event
-  interrupts, detailed context, and explicit feedback; they struggled with
-  ambiguous tasks, confusing observations, and insufficient feedback:
-  https://arxiv.org/abs/2403.00690
-- Agentic LLM game benchmarks show current LLM/VLM agents degrade sharply on
-  complex dynamic games and can perform worse with visual representations, so
-  prefer structured text/terminal state plus explicit metrics before adding
-  vision-only approaches:
-  https://arxiv.org/abs/2411.13543
-- BALROG itself is an evaluation benchmark for agentic LLM/VLM behavior over RL
-  environments. Treat it as optional benchmark infrastructure, not as the
-  trainer that owns this repo's RL loop:
-  https://github.com/balrog-ai/BALROG
+- NLE: https://github.com/NetHack-LE/nle
+- NetHack Challenge analysis: https://arxiv.org/abs/2203.11889
+- NetHack Learning Dataset: https://arxiv.org/abs/2211.00539
+- Neural NetHack architectures and HiHack: https://arxiv.org/abs/2305.19240
+- LLM NetHack agents: https://arxiv.org/abs/2403.00690
+- BALROG: https://github.com/balrog-ai/BALROG

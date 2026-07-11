@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 
 def resolve_local_wandb_mode(env: Mapping[str, str | None] | None = None) -> str:
@@ -135,6 +136,181 @@ def log_sft_build_to_wandb(
         return mode
     finally:
         _restore_env(restored_env)
+
+
+def log_pseudo_label_audit_to_wandb(
+    *,
+    report_path: str | Path,
+    report: Mapping[str, Any],
+    config: Mapping[str, object],
+    env: Mapping[str, str | None] | None = None,
+    project: str = "learn-nethack",
+    run_name: str | None = None,
+) -> dict[str, Any]:
+    """Mirror a local pseudo-label audit report to a mandatory W&B run."""
+    mode = resolve_local_wandb_mode(env)
+    target = Path(report_path)
+    restored_env = _setdefault_local_wandb_storage(target.parent)
+    try:
+        import wandb
+    except ImportError as exc:  # pragma: no cover - required in pyproject.
+        _restore_env(restored_env)
+        raise RuntimeError("wandb is required for pseudo-label audit logging") from exc
+
+    try:
+        init_kwargs: dict[str, object] = {
+            "project": project,
+            "name": run_name,
+            "job_type": "pseudo-label-audit",
+            "mode": mode,
+            "config": dict(config),
+        }
+        settings_factory = getattr(wandb, "Settings", None)
+        if settings_factory is not None:
+            init_kwargs["settings"] = settings_factory(
+                x_disable_machine_info=True,
+                x_disable_stats=True,
+            )
+        run = wandb.init(**init_kwargs)
+        run_path = getattr(run, "path", None)
+        if isinstance(run_path, tuple):
+            run_path = list(run_path)
+        artifact_name = f"pseudo-label-audit-{target.parent.name}"
+        wandb_report = {
+            key: value
+            for key, value in {
+                "mode": mode,
+                "project": project,
+                "run_id": getattr(run, "id", None),
+                "run_name": getattr(run, "name", None),
+                "run_url": getattr(run, "url", None),
+                "run_path": run_path,
+                "artifact_name": artifact_name,
+            }.items()
+            if value is not None
+        }
+        enriched_report = {**dict(report), "wandb": wandb_report}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(enriched_report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        run.log(_pseudo_label_audit_metrics(enriched_report))
+        artifact = wandb.Artifact(name=artifact_name, type="evaluation")
+        artifact.add_file(str(target))
+        run.log_artifact(artifact)
+        run.finish()
+        return wandb_report
+    finally:
+        _restore_env(restored_env)
+
+
+def log_sft_integrity_to_wandb(
+    *,
+    report_path: str | Path,
+    report: Mapping[str, Any],
+    config: Mapping[str, object],
+    env: Mapping[str, str | None] | None = None,
+    project: str = "learn-nethack",
+    run_name: str | None = None,
+) -> dict[str, Any]:
+    """Mirror a local SFT integrity report to a mandatory W&B run."""
+    mode = resolve_local_wandb_mode(env)
+    target = Path(report_path)
+    restored_env = _setdefault_local_wandb_storage(target.parent)
+    try:
+        import wandb
+    except ImportError as exc:  # pragma: no cover - required in pyproject.
+        _restore_env(restored_env)
+        raise RuntimeError("wandb is required for SFT integrity logging") from exc
+
+    try:
+        init_kwargs: dict[str, object] = {
+            "project": project,
+            "name": run_name,
+            "job_type": "sft-integrity-audit",
+            "mode": mode,
+            "config": dict(config),
+        }
+        settings_factory = getattr(wandb, "Settings", None)
+        if settings_factory is not None:
+            init_kwargs["settings"] = settings_factory(
+                x_disable_machine_info=True,
+                x_disable_stats=True,
+            )
+        run = wandb.init(**init_kwargs)
+        run_path = getattr(run, "path", None)
+        if isinstance(run_path, tuple):
+            run_path = list(run_path)
+        artifact_name = f"sft-integrity-{target.parent.name}"
+        wandb_report = {
+            key: value
+            for key, value in {
+                "mode": mode,
+                "project": project,
+                "run_id": getattr(run, "id", None),
+                "run_name": getattr(run, "name", None),
+                "run_url": getattr(run, "url", None),
+                "run_path": run_path,
+                "artifact_name": artifact_name,
+            }.items()
+            if value is not None
+        }
+        enriched_report = {**dict(report), "wandb": wandb_report}
+        target.write_text(
+            json.dumps(enriched_report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        run.log(_sft_integrity_metrics(enriched_report))
+        artifact = wandb.Artifact(name=artifact_name, type="dataset-validation")
+        artifact.add_file(str(target))
+        run.log_artifact(artifact)
+        run.finish()
+        return wandb_report
+    finally:
+        _restore_env(restored_env)
+
+
+def _pseudo_label_audit_metrics(report: Mapping[str, Any]) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    for section_name in ("counts", "rates"):
+        section = report.get(section_name)
+        if not isinstance(section, Mapping):
+            continue
+        for key, value in section.items():
+            if isinstance(value, bool):
+                metrics[f"pseudo_label_audit/{section_name}/{key}"] = float(value)
+            elif isinstance(value, int | float):
+                metrics[f"pseudo_label_audit/{section_name}/{key}"] = float(value)
+    promotion = report.get("promotion")
+    if isinstance(promotion, Mapping):
+        for key, value in promotion.items():
+            if isinstance(value, bool):
+                metrics[f"pseudo_label_audit/promotion/{key}"] = float(value)
+            elif isinstance(value, int | float):
+                metrics[f"pseudo_label_audit/promotion/{key}"] = float(value)
+    return metrics
+
+
+def _sft_integrity_metrics(report: Mapping[str, Any]) -> dict[str, float]:
+    metrics = {"sft_integrity/passed": float(report.get("passed") is True)}
+    counts = report.get("counts")
+    if isinstance(counts, Mapping):
+        for key, value in counts.items():
+            if isinstance(value, int | float):
+                metrics[f"sft_integrity/counts/{key}"] = float(value)
+    action_distribution = report.get("action_distribution")
+    if isinstance(action_distribution, Mapping):
+        for key in ("unique_action_count", "dominant_action_rate"):
+            value = action_distribution.get(key)
+            if isinstance(value, int | float):
+                metrics[f"sft_integrity/actions/{key}"] = float(value)
+    dynamics = report.get("dynamics_diagnostics")
+    if isinstance(dynamics, Mapping):
+        for key, value in dynamics.items():
+            if isinstance(value, int | float):
+                metrics[f"sft_integrity/dynamics/{key}"] = float(value)
+    return metrics
 
 
 def _setdefault_local_wandb_storage(target: Path) -> dict[str, str | None]:

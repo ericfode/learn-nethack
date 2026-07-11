@@ -1107,6 +1107,67 @@ class ModalReadinessTests(unittest.TestCase):
             str(dataset_dir / "manifest.json"),
         )
 
+    def test_existing_sft_dataset_summary_rejects_incomplete_split_limits(
+        self,
+    ) -> None:
+        modal_train = importlib.import_module("learn_nethack.modal_train")
+
+        with TemporaryDirectory() as tmp:
+            dataset_dir = Path(tmp)
+            (dataset_dir / "train.jsonl").write_text("{}\n", encoding="utf-8")
+            (dataset_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "learn-nethack.sft-manifest.v1",
+                        "split_row_limits": {
+                            "train": 20_000,
+                            "validation": 2_000,
+                            "test": 2_000,
+                        },
+                        "split_limits_satisfied": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (dataset_dir / "rejection_report.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "split row limits"):
+                modal_train._existing_sft_dataset_summary(dataset_dir)
+
+    def test_existing_sft_dataset_summary_requires_integrity_for_corrected_data(
+        self,
+    ) -> None:
+        modal_train = importlib.import_module("learn_nethack.modal_train")
+
+        with TemporaryDirectory() as tmp:
+            dataset_dir = Path(tmp)
+            (dataset_dir / "train.jsonl").write_text("{}\n", encoding="utf-8")
+            (dataset_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "learn-nethack.sft-manifest.v1",
+                        "env_id": "NetHackChallenge-v0",
+                        "split_row_limits": {
+                            "train": 20_000,
+                            "validation": 2_000,
+                            "test": 2_000,
+                        },
+                        "split_limits_satisfied": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (dataset_dir / "rejection_report.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(FileNotFoundError, "integrity report"):
+                modal_train._existing_sft_dataset_summary(dataset_dir)
+
     def test_modal_sft_build_progress_logger_appends_durable_jsonl(self) -> None:
         modal_train = importlib.import_module("learn_nethack.modal_train")
         from learn_nethack.sft_build import SftBuildProgress

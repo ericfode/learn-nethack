@@ -6,15 +6,35 @@ Status: proposed execution plan
 
 ## Goal
 
-Produce a Gemma 4 checkpoint that is demonstrably better than base Gemma and
-the current 20k-row adapter at both:
+Produce a reproducible Gemma 4 checkpoint that improves live NetHack play
+relative to frozen base-Gemma and current-20k baselines.
 
-1. selecting valid, useful NLE actions; and
-2. predicting action-conditioned next-1/5/10 observations.
+First prove assistant-only loss, game-disjoint splits, label integrity, and
+online W&B plus local-ledger reporting. Then run matched corrected-20k
+experiments. Scale the winning recipe to the full corpus only if the
+corrected-20k gate passes.
 
-The checkpoint is promoted to RL only if it passes the current v7 live-rollout
-proof gate. Offline imitation or frame-character gains alone do not count as
-success.
+Success requires:
+
+1. Policy JSON and action-space validity remain 1.0; useful-action accuracy
+   improves without dominant-action collapse.
+2. Autoregressive next-1/5/10 changed-state metrics improve against
+   copy-current and matched deterministic baselines. Raw character accuracy is
+   diagnostic only.
+3. At least 16 paired-seed NLE rollouts under `live_rollout_utility_v7`
+   demonstrate score, reward, or depth progress without regressions in HP
+   damage, deaths, walls, menus, non-advancing actions, repetition, hunger, or
+   role robustness.
+4. Every run has online W&B, local reports, terminal events, ttyrecs, replay
+   media, and watchable demonstrations.
+5. The promoted checkpoint is compared under matched versions of the external
+   benchmark protocols in `benchmarks/nethack_benchmarks.json`; experimentation
+   continues until the learned-agent competitive gate passes.
+
+Dynamics improvement alone does not complete the goal. Promote to RL only
+after the live SFT gate passes. If a corrected-20k experiment fails, record the
+falsified label, objective, representation, or curriculum hypothesis and run a
+new pre-registered experiment rather than scaling the failed recipe.
 
 ## Current Evidence
 
@@ -32,6 +52,40 @@ success.
 | Trainer | Existing-JSONL path formats rows into `text` and sets `assistant_only_loss=False` | Prompt-token loss is a pre-training correctness blocker |
 | Labels | Full archive uses `pseudo_visible_player_delta`; 52.3% of observed transitions were rejected | These are movement-effect labels, not verified player keypresses |
 | W&B | Modal has `wandb-secret`; the local shell has no API key and 8 offline runs | Cloud auth likely exists, but end-to-end online logging must be reproven |
+
+## External Benchmark Ladder
+
+The versioned source of truth is `benchmarks/nethack_benchmarks.json`. Refresh
+it immediately before an external evaluation campaign; never silently move a
+target during a run.
+
+| Tier | Frozen target | Completion role |
+| --- | --- | --- |
+| Internal | base Gemma, current 20k adapter, copy-current dynamics, deterministic structured-delta dynamics | Required training proof |
+| Learned NLE | HiHack mean NLE score 1551 under a matched full-episode challenge protocol | Required competitive gate |
+| LLM agent | BALROG NetHack leader band, currently Claude Opus 4.5 at 2.0 +/- 0.5 progress in the 2026-02-24 snapshot | Required competitive gate |
+| Neural milestone | Sample Factory APPO mean 700-800, median 400 | Reported milestone |
+| Symbolic | AutoAscend / NetHack Challenge winner | Mandatory gap report, not mixed into learned-agent statistics |
+| Human | full-game score, depth, and ascension references | Mandatory long-horizon ceiling report |
+
+"Competitive" means the checkpoint passes the internal training proof and its
+lower confidence bound reaches every required external target under that
+target's exact protocol. An 80-step development rollout cannot be compared to a
+full-episode NLE score, and native NLE reward cannot be substituted for BALROG
+progress.
+
+```mermaid
+flowchart LR
+  I["Internal integrity and v7 proof"] --> N["Matched full-episode NLE evaluation"]
+  I --> B["BALROG NetHack evaluation"]
+  N --> H{"Lower bound >= HiHack 1551?"}
+  B --> L{"Lower bound >= BALROG leader band?"}
+  H -- "No" --> X["Diagnose and run next pre-registered experiment"]
+  L -- "No" --> X
+  H -- "Yes" --> C["Learned-agent competitive"]
+  L -- "Yes" --> C
+  C --> R["Report AutoAscend and human gaps"]
+```
 
 ## Decision
 

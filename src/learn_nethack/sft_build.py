@@ -7,7 +7,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from learn_nethack.observations import render_observation_text
 from learn_nethack.nld_decode import normalize_decoded_batch, normalize_frame_only_batch
@@ -45,6 +45,20 @@ class SftBuildProgress:
 ProgressCallback = Callable[[SftBuildProgress], None]
 
 
+@dataclass(frozen=True)
+class SplitRowLimits:
+    train: int
+    validation: int
+    test: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "train": self.train,
+            "validation": self.validation,
+            "test": self.test,
+        }
+
+
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -78,7 +92,10 @@ def write_sft_dataset(
     token_budget: int = 2048,
     progress_callback: ProgressCallback | None = None,
     progress_interval: int = 1000,
+    split_row_limits: SplitRowLimits | None = None,
+    game_order_strategy: str = "source_order",
 ) -> SftBuildResult:
+    _validate_row_limit_contract(max_rows=max_rows, split_row_limits=split_row_limits)
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
     rejection_reasons: Counter[str] = Counter()
@@ -87,6 +104,8 @@ def write_sft_dataset(
     accepted_next_frame_rows = 0
     processed_transitions = 0
     sample_rows: list[dict] = []
+    accepted_rows_by_split = _empty_split_task_counts()
+    split_quota_skips: Counter[str] = Counter()
 
     with ExitStack() as stack:
         handles: dict[tuple[str, str | None], Any] = {}
@@ -104,8 +123,15 @@ def write_sft_dataset(
 
         for transition in transitions:
             processed_transitions += 1
+            if split_row_limits is not None and _all_split_limits_reached(
+                tasks=tasks,
+                counts=accepted_rows_by_split,
+                limits=split_row_limits,
+            ):
+                break
             if (
-                max_rows is not None
+                split_row_limits is None
+                and max_rows is not None
                 and _accepted_rows_for_limit(
                     tasks=tasks,
                     accepted_policy_rows=accepted_policy_rows,
@@ -131,6 +157,22 @@ def write_sft_dataset(
                 )
                 continue
 
+            write_policy = "policy_action" in tasks and _split_task_has_capacity(
+                split=split,
+                task="policy_action",
+                counts=accepted_rows_by_split,
+                limits=split_row_limits,
+            )
+            write_next_frame = "next_frame" in tasks and _split_task_has_capacity(
+                split=split,
+                task="next_frame",
+                counts=accepted_rows_by_split,
+                limits=split_row_limits,
+            )
+            if not write_policy and not write_next_frame:
+                split_quota_skips[split] += 1
+                continue
+
             game_metadata = game_metadata_by_id.get(transition.gameid, {})
             current_history = history.history_for(
                 gameid=transition.gameid,
@@ -139,7 +181,7 @@ def write_sft_dataset(
             )
 
             action_id: int | None = None
-            if "policy_action" in tasks or "next_frame" in tasks:
+            if write_policy or write_next_frame:
                 try:
                     action_id = action_manifest.action_id_for_raw_key(
                         transition.raw_key_code
@@ -172,7 +214,7 @@ def write_sft_dataset(
                         last_step=transition.step,
                     )
                     continue
-            if "policy_action" in tasks:
+            if write_policy:
                 policy_row = build_policy_action_row(
                     dataset_name=dataset_name,
                     split=split,
@@ -186,9 +228,10 @@ def write_sft_dataset(
                 if split == "train" and len(sample_rows) < 10:
                     sample_rows.append(policy_row)
                 accepted_policy_rows += 1
+                accepted_rows_by_split[split]["policy_action"] += 1
                 action_id = int(policy_row["metadata"]["target_action_id"])
 
-            if "next_frame" in tasks:
+            if write_next_frame:
                 try:
                     next_frame_row = build_next_frame_row(
                         dataset_name=dataset_name,
@@ -206,6 +249,7 @@ def write_sft_dataset(
                     if split == "train" and len(sample_rows) < 10:
                         sample_rows.append(next_frame_row)
                     accepted_next_frame_rows += 1
+                    accepted_rows_by_split[split]["next_frame"] += 1
 
             if action_id is not None:
                 history.append(
@@ -239,6 +283,11 @@ def write_sft_dataset(
         raise RuntimeError("SFT dataset build produced zero next_frame rows")
 
     total_rejected = sum(rejection_reasons.values())
+    split_limits_satisfied = _split_limits_satisfied(
+        tasks=tasks,
+        counts=accepted_rows_by_split,
+        limits=split_row_limits,
+    )
     manifest = {
         "schema_version": "learn-nethack.sft-manifest.v1",
         "dataset_name": dataset_name,
@@ -247,6 +296,13 @@ def write_sft_dataset(
         "env_id": action_manifest.env_id,
         "accepted_policy_rows": accepted_policy_rows,
         "accepted_next_frame_rows": accepted_next_frame_rows,
+        "accepted_rows_by_split": accepted_rows_by_split,
+        "split_row_limits": (
+            split_row_limits.as_dict() if split_row_limits is not None else None
+        ),
+        "split_limits_satisfied": split_limits_satisfied,
+        "split_quota_skips": dict(sorted(split_quota_skips.items())),
+        "game_order_strategy": game_order_strategy,
         "rejected_rows": total_rejected,
         "next_frame_status": "ok" if accepted_next_frame_rows else "no_rows",
     }
@@ -267,6 +323,12 @@ def write_sft_dataset(
     with (target / "sample_rows.jsonl").open("w", encoding="utf-8") as handle:
         for row in sample_rows:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+    _raise_for_unsatisfied_split_limits(
+        tasks=tasks,
+        counts=accepted_rows_by_split,
+        limits=split_row_limits,
+    )
 
     return SftBuildResult(
         accepted_policy_rows=accepted_policy_rows,
@@ -468,8 +530,10 @@ def write_pseudo_label_policy_dataset(
     token_budget: int = 2048,
     progress_callback: ProgressCallback | None = None,
     progress_interval: int = 1000,
+    split_row_limits: SplitRowLimits | None = None,
 ) -> SftBuildResult:
     """Write rows from explicit high-confidence frame-derived action labels."""
+    _validate_row_limit_contract(max_rows=max_rows, split_row_limits=split_row_limits)
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
     rejection_reasons: Counter[str] = Counter()
@@ -478,6 +542,8 @@ def write_pseudo_label_policy_dataset(
     accepted_next_frame_rows = 0
     processed_transitions = 0
     sample_rows: list[dict] = []
+    accepted_rows_by_split = _empty_split_task_counts()
+    split_quota_skips: Counter[str] = Counter()
 
     with ExitStack() as stack:
         handles: dict[tuple[str, str | None], Any] = {}
@@ -500,8 +566,15 @@ def write_pseudo_label_policy_dataset(
 
         for transition in transitions:
             processed_transitions += 1
+            if split_row_limits is not None and _all_split_limits_reached(
+                tasks=tasks,
+                counts=accepted_rows_by_split,
+                limits=split_row_limits,
+            ):
+                break
             if (
-                max_rows is not None
+                split_row_limits is None
+                and max_rows is not None
                 and _accepted_rows_for_limit(
                     tasks=tasks,
                     accepted_policy_rows=accepted_policy_rows,
@@ -524,6 +597,21 @@ def write_pseudo_label_policy_dataset(
                     last_gameid=transition.gameid,
                     last_step=transition.step,
                 )
+                continue
+            write_policy = "policy_action" in tasks and _split_task_has_capacity(
+                split=split,
+                task="policy_action",
+                counts=accepted_rows_by_split,
+                limits=split_row_limits,
+            )
+            write_next_frame = "next_frame" in tasks and _split_task_has_capacity(
+                split=split,
+                task="next_frame",
+                counts=accepted_rows_by_split,
+                limits=split_row_limits,
+            )
+            if not write_policy and not write_next_frame:
+                split_quota_skips[split] += 1
                 continue
             pseudo_label = infer_visible_movement_pseudo_label(
                 transition=transition,
@@ -549,7 +637,7 @@ def write_pseudo_label_policy_dataset(
                 mode=mode,
                 token_budget=token_budget,
             )
-            if "policy_action" in tasks:
+            if write_policy:
                 row = build_pseudo_policy_action_row(
                     dataset_name=dataset_name,
                     split=split,
@@ -564,7 +652,8 @@ def write_pseudo_label_policy_dataset(
                 if split == "train" and len(sample_rows) < 10:
                     sample_rows.append(row)
                 accepted_policy_rows += 1
-            if "next_frame" in tasks:
+                accepted_rows_by_split[split]["policy_action"] += 1
+            if write_next_frame:
                 row = build_pseudo_next_frame_row(
                     dataset_name=dataset_name,
                     split=split,
@@ -579,6 +668,7 @@ def write_pseudo_label_policy_dataset(
                 if split == "train" and len(sample_rows) < 10:
                     sample_rows.append(row)
                 accepted_next_frame_rows += 1
+                accepted_rows_by_split[split]["next_frame"] += 1
             history.append(
                 gameid=transition.gameid,
                 observation_text=render_observation_text(transition.observation),
@@ -608,6 +698,11 @@ def write_pseudo_label_policy_dataset(
         raise RuntimeError("pseudo-label dataset build produced zero next_frame rows")
 
     total_rejected = sum(rejection_reasons.values())
+    split_limits_satisfied = _split_limits_satisfied(
+        tasks=tasks,
+        counts=accepted_rows_by_split,
+        limits=split_row_limits,
+    )
     manifest = {
         "schema_version": "learn-nethack.sft-manifest.v1",
         "dataset_name": dataset_name,
@@ -618,6 +713,12 @@ def write_pseudo_label_policy_dataset(
         "env_id": action_manifest.env_id,
         "accepted_policy_rows": accepted_policy_rows,
         "accepted_next_frame_rows": accepted_next_frame_rows,
+        "accepted_rows_by_split": accepted_rows_by_split,
+        "split_row_limits": (
+            split_row_limits.as_dict() if split_row_limits is not None else None
+        ),
+        "split_limits_satisfied": split_limits_satisfied,
+        "split_quota_skips": dict(sorted(split_quota_skips.items())),
         "rejected_rows": total_rejected,
         "next_frame_status": "ok" if accepted_next_frame_rows else "no_rows",
     }
@@ -638,6 +739,12 @@ def write_pseudo_label_policy_dataset(
     with (target / "sample_rows.jsonl").open("w", encoding="utf-8") as handle:
         for row in sample_rows:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+    _raise_for_unsatisfied_split_limits(
+        tasks=tasks,
+        counts=accepted_rows_by_split,
+        limits=split_row_limits,
+    )
 
     return SftBuildResult(
         accepted_policy_rows=accepted_policy_rows,
@@ -711,6 +818,8 @@ def build_sft_from_decoded_batches(
     tasks: tuple[str, ...] = ("policy_action", "next_frame"),
     progress_callback: ProgressCallback | None = None,
     progress_interval: int = 1000,
+    split_row_limits: SplitRowLimits | None = None,
+    game_order_strategy: str = "source_order",
 ) -> SftBuildResult:
     splits = split_gameids(gameids, seed=seed)
     split_sets = {
@@ -733,6 +842,8 @@ def build_sft_from_decoded_batches(
         tasks=tasks,
         progress_callback=progress_callback,
         progress_interval=progress_interval,
+        split_row_limits=split_row_limits,
+        game_order_strategy=game_order_strategy,
     )
 
 
@@ -750,6 +861,7 @@ def build_pseudo_label_sft_from_frame_batches(
     tasks: tuple[str, ...] = ("policy_action",),
     progress_callback: ProgressCallback | None = None,
     progress_interval: int = 1000,
+    split_row_limits: SplitRowLimits | None = None,
 ) -> SftBuildResult:
     """Build SFT rows from frame-only batches with explicit pseudo-labels."""
     splits = split_gameids(gameids, seed=seed)
@@ -775,4 +887,85 @@ def build_pseudo_label_sft_from_frame_batches(
         tasks=tasks,
         progress_callback=progress_callback,
         progress_interval=progress_interval,
+        split_row_limits=split_row_limits,
+    )
+
+
+def _validate_row_limit_contract(
+    *,
+    max_rows: int | None,
+    split_row_limits: SplitRowLimits | None,
+) -> None:
+    if max_rows is not None and split_row_limits is not None:
+        raise ValueError("use max_rows or split_row_limits, not both")
+    if split_row_limits is None:
+        return
+    for split, limit in split_row_limits.as_dict().items():
+        if limit <= 0:
+            raise ValueError(f"split row limit for {split} must be positive")
+
+
+def _empty_split_task_counts() -> dict[str, dict[str, int]]:
+    return {
+        split: {"policy_action": 0, "next_frame": 0}
+        for split in ("train", "validation", "test")
+    }
+
+
+def _split_task_has_capacity(
+    *,
+    split: str,
+    task: str,
+    counts: Mapping[str, Mapping[str, int]],
+    limits: SplitRowLimits | None,
+) -> bool:
+    if limits is None:
+        return True
+    return int(counts[split][task]) < int(limits.as_dict()[split])
+
+
+def _all_split_limits_reached(
+    *,
+    tasks: tuple[str, ...],
+    counts: Mapping[str, Mapping[str, int]],
+    limits: SplitRowLimits,
+) -> bool:
+    limit_by_split = limits.as_dict()
+    return all(
+        int(counts[split][task]) >= int(limit_by_split[split])
+        for split in ("train", "validation", "test")
+        for task in tasks
+    )
+
+
+def _split_limits_satisfied(
+    *,
+    tasks: tuple[str, ...],
+    counts: Mapping[str, Mapping[str, int]],
+    limits: SplitRowLimits | None,
+) -> bool | None:
+    if limits is None:
+        return None
+    return _all_split_limits_reached(tasks=tasks, counts=counts, limits=limits)
+
+
+def _raise_for_unsatisfied_split_limits(
+    *,
+    tasks: tuple[str, ...],
+    counts: Mapping[str, Mapping[str, int]],
+    limits: SplitRowLimits | None,
+) -> None:
+    if limits is None or _all_split_limits_reached(
+        tasks=tasks,
+        counts=counts,
+        limits=limits,
+    ):
+        return
+    actual = {
+        split: {task: int(counts[split][task]) for task in tasks}
+        for split in ("train", "validation", "test")
+    }
+    raise RuntimeError(
+        "split row limits not satisfied: "
+        f"expected={limits.as_dict()} per task; actual={actual}"
     )

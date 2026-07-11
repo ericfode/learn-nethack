@@ -12,14 +12,18 @@ from unittest.mock import patch
 from learn_nethack.sft_train import (
     SftTrainConfig,
     apply_gradient_checkpointing_contract,
+    build_assistant_mask_report,
     build_phase_rows,
     build_sft_jsonl_curriculum_plan,
     build_sft_jsonl_training_plan,
     configure_training_runtime,
     create_unsloth_sft_trainer_from_jsonl,
     format_row_for_sft,
+    get_trainer_assistant_mask_report,
     require_wandb_for_training,
     resolve_jsonl_training_config,
+    summarize_trainer_loss_history,
+    tokenize_row_for_assistant_only_loss,
 )
 
 
@@ -42,13 +46,14 @@ class FakeTokenizer:
         tokenize: bool,
         add_generation_prompt: bool,
     ) -> str:
-        if tokenize:
-            raise AssertionError("format_row_for_sft should request text")
-        if add_generation_prompt:
-            raise AssertionError("supervised rows already include assistant output")
-        return "\n".join(
+        rendered = "\n".join(
             f"{message['role']}:{message['content']}" for message in messages
         )
+        if add_generation_prompt:
+            rendered = f"{rendered}\nassistant:"
+        if tokenize:
+            return list(rendered.encode("utf-8"))
+        return rendered
 
 
 class SftTrainTests(unittest.TestCase):
@@ -176,6 +181,88 @@ class SftTrainTests(unittest.TestCase):
             formatted["text"],
             "system:system\nuser:user 7\nassistant:assistant 7",
         )
+
+    def test_assistant_only_tokenization_masks_prompt_and_keeps_response(
+        self,
+    ) -> None:
+        tokenized = tokenize_row_for_assistant_only_loss(
+            _row("policy_action", 7),
+            FakeTokenizer(),
+            max_seq_length=512,
+        )
+
+        prompt_count = tokenized["prompt_token_count"]
+        self.assertGreater(prompt_count, 0)
+        self.assertTrue(
+            all(label == -100 for label in tokenized["labels"][:prompt_count])
+        )
+        self.assertEqual(
+            tokenized["labels"][prompt_count:],
+            tokenized["input_ids"][prompt_count:],
+        )
+        self.assertGreater(tokenized["supervised_assistant_token_count"], 0)
+        self.assertEqual(tokenized["assistant_tokens_truncated"], 0)
+
+    def test_assistant_only_tokenization_rejects_template_prefix_mismatch(
+        self,
+    ) -> None:
+        class MismatchedTokenizer(FakeTokenizer):
+            def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+                encoded = super().apply_chat_template(
+                    messages,
+                    tokenize=tokenize,
+                    add_generation_prompt=add_generation_prompt,
+                )
+                if tokenize and not add_generation_prompt:
+                    return [999, *encoded]
+                return encoded
+
+        with self.assertRaisesRegex(ValueError, "verifiable final assistant suffix"):
+            tokenize_row_for_assistant_only_loss(
+                _row("policy_action", 1),
+                MismatchedTokenizer(),
+                max_seq_length=512,
+            )
+
+    def test_assistant_only_tokenization_rejects_prompt_only_truncation(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "truncates every final assistant token"
+        ):
+            tokenize_row_for_assistant_only_loss(
+                _row("policy_action", 1),
+                FakeTokenizer(),
+                max_seq_length=5,
+            )
+
+    def test_assistant_mask_report_breaks_counts_out_by_task(self) -> None:
+        rows = [
+            tokenize_row_for_assistant_only_loss(
+                _row("policy_action", 1), FakeTokenizer(), max_seq_length=512
+            ),
+            tokenize_row_for_assistant_only_loss(
+                _row("next_frame", 2), FakeTokenizer(), max_seq_length=512
+            ),
+        ]
+
+        report = build_assistant_mask_report(rows)
+
+        self.assertEqual(report["row_count"], 2)
+        self.assertEqual(set(report["per_task"]), {"policy_action", "next_frame"})
+        self.assertEqual(
+            report["prompt_token_count"], report["masked_prompt_token_count"]
+        )
+        self.assertGreater(report["supervised_token_fraction"], 0.0)
+        self.assertLess(report["supervised_token_fraction"], 1.0)
+
+    def test_trainer_loss_history_requires_observed_decrease(self) -> None:
+        report = summarize_trainer_loss_history(
+            [{"loss": 3.0}, {"learning_rate": 1e-4}, {"loss": 1.25}]
+        )
+
+        self.assertEqual(report["logged_loss_count"], 2)
+        self.assertEqual(report["first_loss"], 3.0)
+        self.assertEqual(report["last_loss"], 1.25)
+        self.assertTrue(report["loss_decreased"])
 
     def test_require_wandb_for_training_fails_loud_without_mode_or_key(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "WANDB_API_KEY is required"):
@@ -510,7 +597,7 @@ class SftTrainTests(unittest.TestCase):
                 env={},
             )
 
-    def test_jsonl_trainer_disables_assistant_only_loss_after_text_formatting(
+    def test_jsonl_trainer_uses_explicit_assistant_only_labels(
         self,
     ) -> None:
         captured_args: dict = {}
@@ -529,12 +616,23 @@ class SftTrainTests(unittest.TestCase):
         class FakeDataset:
             column_names = ["messages", "task"]
 
-            def map(self, formatter, *, batched, remove_columns):
+            def map(
+                self,
+                formatter,
+                *,
+                batched,
+                remove_columns,
+                load_from_cache_file,
+            ):
                 self.formatted = formatter(
-                    {"messages": [_row("policy_action", 1)["messages"]]}
+                    {
+                        "messages": [_row("policy_action", 1)["messages"]],
+                        "task": ["policy_action"],
+                    }
                 )
                 self.batched = batched
                 self.remove_columns = remove_columns
+                self.load_from_cache_file = load_from_cache_file
                 return self
 
         def fake_load_dataset(*_args, **_kwargs):
@@ -563,7 +661,7 @@ class SftTrainTests(unittest.TestCase):
                 json.dumps(_row("policy_action", 1)), encoding="utf-8"
             )
 
-            create_unsloth_sft_trainer_from_jsonl(
+            trainer = create_unsloth_sft_trainer_from_jsonl(
                 jsonl_paths=[train_path],
                 output_dir=Path(tmp) / "adapter",
                 config=SftTrainConfig(),
@@ -571,10 +669,19 @@ class SftTrainTests(unittest.TestCase):
             )
 
         self.assertFalse(captured_args["assistant_only_loss"])
-        self.assertEqual(captured_args["dataset_text_field"], "text")
+        self.assertFalse(captured_args["completion_only_loss"])
         self.assertFalse(captured_args["gradient_checkpointing"])
         self.assertIsNone(captured_args["dataset_num_proc"])
         self.assertFalse(captured_peft_args["use_gradient_checkpointing"])
+        dataset = trainer.kwargs["train_dataset"]
+        prompt_count = dataset.formatted["prompt_token_count"][0]
+        labels = dataset.formatted["labels"][0]
+        self.assertTrue(all(label == -100 for label in labels[:prompt_count]))
+        self.assertTrue(all(label != -100 for label in labels[prompt_count:]))
+        self.assertFalse(dataset.load_from_cache_file)
+        mask_report = get_trainer_assistant_mask_report(trainer)
+        self.assertEqual(mask_report["row_count"], 1)
+        self.assertGreater(mask_report["supervised_assistant_token_count"], 0)
 
 
 if __name__ == "__main__":

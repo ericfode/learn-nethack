@@ -68,9 +68,16 @@ def _player_positions(observation: dict[str, Any]) -> list[tuple[int, int]]:
     tty_chars = observation.get("tty_chars") or []
     positions: list[tuple[int, int]] = []
     for row_index, row in enumerate(tty_chars):
-        for col_index, value in enumerate(row):
-            if int(value) == PLAYER_GLYPH:
-                positions.append((row_index, col_index))
+        start = 0
+        while start < len(row):
+            try:
+                col_index = row.index(PLAYER_GLYPH, start)
+            except ValueError:
+                break
+            positions.append((row_index, col_index))
+            if len(positions) > 1:
+                return positions
+            start = col_index + 1
     return positions
 
 

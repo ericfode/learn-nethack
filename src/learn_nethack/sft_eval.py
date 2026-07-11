@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 from collections import defaultdict
+from difflib import SequenceMatcher
 from itertools import zip_longest
+import json
 import math
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from learn_nethack.compare_watch import select_action_id
 from learn_nethack.dynamics_play import parse_next_frame_response
@@ -26,6 +29,20 @@ MAX_WATCH_CURRENT_NON_ADVANCING_STEP_RATE = 0.20
 MAX_WATCH_CURRENT_ACTION_REPEAT_RATE = 0.60
 MAX_WATCH_CURRENT_MENU_OR_PROMPT_STEP_RATE = 0.20
 MAX_WATCH_CURRENT_ZERO_PROGRESS_EPISODE_RATE = 0.0
+CHANGED_STATE_METRIC_SUFFIXES = (
+    "player_coordinate_exact_rate",
+    "changed_map_cell_precision",
+    "changed_map_cell_recall",
+    "changed_map_cell_f1",
+    "unchanged_map_cell_copy_rate",
+    "blstats_parse_valid_rate",
+    "blstats_field_exact_rate",
+    "blstats_numeric_mae",
+    "blstats_numeric_comparable_rate",
+    "game_turn_delta_exact_rate",
+    "message_normalized_exact_rate",
+    "message_edit_similarity",
+)
 
 
 def _rate(count: int, total: int) -> float:
@@ -77,7 +94,12 @@ def compute_next_frame_metrics(
     *,
     predictions: list[str],
     labels: list[str],
+    current_frames: list[str] | None = None,
 ) -> dict[str, float]:
+    if len(predictions) != len(labels):
+        raise ValueError("next-frame predictions and labels must have equal length")
+    if current_frames is not None and len(current_frames) != len(labels):
+        raise ValueError("next-frame current frames and labels must have equal length")
     row_count = len(labels)
     exact = sum(
         1 for prediction, label in zip(predictions, labels) if prediction == label
@@ -89,7 +111,7 @@ def compute_next_frame_metrics(
             total_chars += 1
             if pred_char == label_char:
                 matching_chars += 1
-    return {
+    metrics = {
         "next_frame_eval_row_count": float(row_count),
         "next_frame_exact_match_rate": _rate(exact, row_count),
         "next_frame_char_accuracy": _rate(matching_chars, total_chars),
@@ -100,6 +122,201 @@ def compute_next_frame_metrics(
             predictions, labels, "MESSAGE:"
         ),
     }
+    metrics.update(_message_metrics(predictions=predictions, labels=labels))
+    if current_frames is not None:
+        metrics.update(
+            _changed_state_metrics(
+                current_frames=current_frames,
+                predictions=predictions,
+                labels=labels,
+            )
+        )
+    return metrics
+
+
+def _changed_state_metrics(
+    *,
+    current_frames: list[str],
+    predictions: list[str],
+    labels: list[str],
+) -> dict[str, float]:
+    true_changed = 0
+    predicted_changed = 0
+    correct_changed = 0
+    true_unchanged = 0
+    copied_unchanged = 0
+    player_coordinate_exact = 0
+    blstats_parse_valid = 0
+    blstats_fields = 0
+    blstats_fields_exact = 0
+    blstats_numeric_fields = 0
+    blstats_numeric_comparable = 0
+    blstats_numeric_absolute_error = 0.0
+    game_turn_delta_eligible = 0
+    game_turn_delta_exact = 0
+
+    for current, prediction, label in zip(current_frames, predictions, labels):
+        current_map = _map_cells(current)
+        prediction_map = _map_cells(prediction)
+        label_map = _map_cells(label)
+        coordinates = set(current_map) | set(prediction_map) | set(label_map)
+        for coordinate in coordinates:
+            current_char = current_map.get(coordinate)
+            prediction_char = prediction_map.get(coordinate)
+            label_char = label_map.get(coordinate)
+            label_changed = label_char != current_char
+            prediction_changed = prediction_char != current_char
+            if label_changed:
+                true_changed += 1
+            else:
+                true_unchanged += 1
+                if prediction_char == current_char:
+                    copied_unchanged += 1
+            if prediction_changed:
+                predicted_changed += 1
+            if label_changed and prediction_changed and prediction_char == label_char:
+                correct_changed += 1
+
+        if _player_coordinate(prediction_map) == _player_coordinate(label_map):
+            if _player_coordinate(label_map) is not None:
+                player_coordinate_exact += 1
+
+        current_blstats = _parse_blstats(current)
+        prediction_blstats = _parse_blstats(prediction)
+        label_blstats = _parse_blstats(label)
+        if prediction_blstats is not None:
+            blstats_parse_valid += 1
+        if label_blstats is not None:
+            for index, label_value in enumerate(label_blstats):
+                blstats_fields += 1
+                prediction_value = (
+                    prediction_blstats[index]
+                    if prediction_blstats is not None
+                    and index < len(prediction_blstats)
+                    else None
+                )
+                if prediction_value == label_value:
+                    blstats_fields_exact += 1
+                if _is_number(label_value):
+                    blstats_numeric_fields += 1
+                    if _is_number(prediction_value):
+                        blstats_numeric_comparable += 1
+                        blstats_numeric_absolute_error += abs(
+                            float(prediction_value) - float(label_value)
+                        )
+
+        if (
+            current_blstats is not None
+            and prediction_blstats is not None
+            and label_blstats is not None
+            and len(current_blstats) > 20
+            and len(prediction_blstats) > 20
+            and len(label_blstats) > 20
+            and _is_number(current_blstats[20])
+            and _is_number(prediction_blstats[20])
+            and _is_number(label_blstats[20])
+        ):
+            game_turn_delta_eligible += 1
+            predicted_delta = float(prediction_blstats[20]) - float(current_blstats[20])
+            label_delta = float(label_blstats[20]) - float(current_blstats[20])
+            if predicted_delta == label_delta:
+                game_turn_delta_exact += 1
+
+    precision = _rate(correct_changed, predicted_changed)
+    recall = _rate(correct_changed, true_changed)
+    changed_f1 = (
+        0.0
+        if precision + recall == 0.0
+        else 2.0 * precision * recall / (precision + recall)
+    )
+    row_count = len(labels)
+    return {
+        "next_frame_player_coordinate_exact_rate": _rate(
+            player_coordinate_exact, row_count
+        ),
+        "next_frame_changed_map_cell_precision": precision,
+        "next_frame_changed_map_cell_recall": recall,
+        "next_frame_changed_map_cell_f1": changed_f1,
+        "next_frame_unchanged_map_cell_copy_rate": _rate(
+            copied_unchanged, true_unchanged
+        ),
+        "next_frame_blstats_parse_valid_rate": _rate(blstats_parse_valid, row_count),
+        "next_frame_blstats_field_exact_rate": _rate(
+            blstats_fields_exact, blstats_fields
+        ),
+        "next_frame_blstats_numeric_mae": _rate(
+            blstats_numeric_absolute_error, blstats_numeric_comparable
+        ),
+        "next_frame_blstats_numeric_comparable_rate": _rate(
+            blstats_numeric_comparable, blstats_numeric_fields
+        ),
+        "next_frame_game_turn_delta_exact_rate": _rate(
+            game_turn_delta_exact, game_turn_delta_eligible
+        ),
+    }
+
+
+def _message_metrics(
+    *,
+    predictions: list[str],
+    labels: list[str],
+) -> dict[str, float]:
+    normalized_exact = 0
+    edit_similarity = 0.0
+    for prediction, label in zip(predictions, labels):
+        prediction_message = _normalized_message(prediction)
+        label_message = _normalized_message(label)
+        if prediction_message == label_message:
+            normalized_exact += 1
+        edit_similarity += SequenceMatcher(
+            None,
+            prediction_message,
+            label_message,
+        ).ratio()
+    return {
+        "next_frame_message_normalized_exact_rate": _rate(
+            normalized_exact, len(labels)
+        ),
+        "next_frame_message_edit_similarity": (
+            edit_similarity / len(labels) if labels else 0.0
+        ),
+    }
+
+
+def _map_cells(frame: str) -> dict[tuple[int, int], str]:
+    map_text = _section(frame, "MAP:")
+    return {
+        (row_index, col_index): char
+        for row_index, row in enumerate(map_text.splitlines())
+        for col_index, char in enumerate(row)
+    }
+
+
+def _player_coordinate(cells: Mapping[tuple[int, int], str]) -> tuple[int, int] | None:
+    positions = [coordinate for coordinate, char in cells.items() if char == "@"]
+    return positions[0] if len(positions) == 1 else None
+
+
+def _parse_blstats(frame: str) -> list[Any] | None:
+    text = _section(frame, "BLSTATS:").strip()
+    if not text or text == "<missing>":
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            value = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return None
+    return value if isinstance(value, list) else None
+
+
+def _normalized_message(frame: str) -> str:
+    return " ".join(_section(frame, "MESSAGE:").split()).casefold()
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 def evaluate_policy_rows_with_policy(
@@ -159,6 +376,7 @@ def evaluate_next_frame_rows_with_predictor(
     """Generate next-frame predictions from SFT rows and compute frame metrics."""
     predictions: list[str] = []
     labels: list[str] = []
+    current_frames: list[str] = []
     parse_valid = 0
     parse_failure_counts: defaultdict[str, int] = defaultdict(int)
     evaluated = 0
@@ -168,8 +386,9 @@ def evaluate_next_frame_rows_with_predictor(
         if max_rows is not None and evaluated >= max_rows:
             break
         metadata = dict(row.get("metadata") or {})
+        current_frame = _current_observation_text(row)
         raw_prediction = predictor.generate_next_frame_json(
-            observation_text=_current_observation_text(row),
+            observation_text=current_frame,
             action_id=int(metadata["conditioning_action_id"]),
             history=[],
         )
@@ -190,6 +409,7 @@ def evaluate_next_frame_rows_with_predictor(
         label = _next_frame_label(row)
         predictions.append(prediction)
         labels.append(label)
+        current_frames.append(current_frame)
         evaluated += 1
         if sample_callback is not None:
             sample_callback(
@@ -224,7 +444,11 @@ def evaluate_next_frame_rows_with_predictor(
                 }
             )
 
-    metrics = compute_next_frame_metrics(predictions=predictions, labels=labels)
+    metrics = compute_next_frame_metrics(
+        predictions=predictions,
+        labels=labels,
+        current_frames=current_frames,
+    )
     metrics["next_frame_parse_valid_rate"] = _rate(parse_valid, evaluated)
     _add_next_frame_parse_failure_metrics(
         metrics=metrics,
@@ -255,6 +479,7 @@ def evaluate_next_frame_sequences_with_predictor(
             raise ValueError(f"next-frame sequence horizon must be positive: {horizon}")
         predictions: list[str] = []
         labels: list[str] = []
+        ground_truth_current_frames: list[str] = []
         parse_valid = 0
         parse_failure_counts: defaultdict[str, int] = defaultdict(int)
         windows = 0
@@ -289,6 +514,7 @@ def evaluate_next_frame_sequences_with_predictor(
                     label = _next_frame_label(row)
                     predictions.append(prediction)
                     labels.append(label)
+                    ground_truth_current_frames.append(_current_observation_text(row))
                     if sample_callback is not None:
                         sample_callback(
                             {
@@ -345,6 +571,7 @@ def evaluate_next_frame_sequences_with_predictor(
         frame_metrics = compute_next_frame_metrics(
             predictions=predictions,
             labels=labels,
+            current_frames=ground_truth_current_frames,
         )
         prefix = f"next_{horizon}_frame_sequence"
         metrics[f"{prefix}_window_count"] = float(windows)
@@ -366,6 +593,8 @@ def evaluate_next_frame_sequences_with_predictor(
         metrics[f"{prefix}_message_exact_rate"] = frame_metrics[
             "next_frame_message_exact_rate"
         ]
+        for suffix in CHANGED_STATE_METRIC_SUFFIXES:
+            metrics[f"{prefix}_{suffix}"] = frame_metrics[f"next_frame_{suffix}"]
     return metrics
 
 
@@ -607,6 +836,18 @@ def build_score_to_beat_report(
         "next_frame_exact_match_rate",
         "next_frame_map_line_exact_rate",
         "next_frame_message_exact_rate",
+        "next_frame_player_coordinate_exact_rate",
+        "next_frame_changed_map_cell_precision",
+        "next_frame_changed_map_cell_recall",
+        "next_frame_changed_map_cell_f1",
+        "next_frame_unchanged_map_cell_copy_rate",
+        "next_frame_blstats_parse_valid_rate",
+        "next_frame_blstats_field_exact_rate",
+        "next_frame_blstats_numeric_mae",
+        "next_frame_blstats_numeric_comparable_rate",
+        "next_frame_game_turn_delta_exact_rate",
+        "next_frame_message_normalized_exact_rate",
+        "next_frame_message_edit_similarity",
         "next_frame_teacher_forced_mean_nll",
         "next_frame_teacher_forced_perplexity",
         "next_frame_teacher_forced_token_accuracy",
@@ -620,6 +861,18 @@ def build_score_to_beat_report(
         "next_1_frame_sequence_char_accuracy",
         "next_1_frame_sequence_map_line_exact_rate",
         "next_1_frame_sequence_message_exact_rate",
+        "next_1_frame_sequence_player_coordinate_exact_rate",
+        "next_1_frame_sequence_changed_map_cell_precision",
+        "next_1_frame_sequence_changed_map_cell_recall",
+        "next_1_frame_sequence_changed_map_cell_f1",
+        "next_1_frame_sequence_unchanged_map_cell_copy_rate",
+        "next_1_frame_sequence_blstats_parse_valid_rate",
+        "next_1_frame_sequence_blstats_field_exact_rate",
+        "next_1_frame_sequence_blstats_numeric_mae",
+        "next_1_frame_sequence_blstats_numeric_comparable_rate",
+        "next_1_frame_sequence_game_turn_delta_exact_rate",
+        "next_1_frame_sequence_message_normalized_exact_rate",
+        "next_1_frame_sequence_message_edit_similarity",
         "next_5_frame_sequence_parse_valid_rate",
         "next_5_frame_sequence_available_window_count",
         "next_5_frame_sequence_available_frame_count",
@@ -630,6 +883,18 @@ def build_score_to_beat_report(
         "next_5_frame_sequence_char_accuracy",
         "next_5_frame_sequence_map_line_exact_rate",
         "next_5_frame_sequence_message_exact_rate",
+        "next_5_frame_sequence_player_coordinate_exact_rate",
+        "next_5_frame_sequence_changed_map_cell_precision",
+        "next_5_frame_sequence_changed_map_cell_recall",
+        "next_5_frame_sequence_changed_map_cell_f1",
+        "next_5_frame_sequence_unchanged_map_cell_copy_rate",
+        "next_5_frame_sequence_blstats_parse_valid_rate",
+        "next_5_frame_sequence_blstats_field_exact_rate",
+        "next_5_frame_sequence_blstats_numeric_mae",
+        "next_5_frame_sequence_blstats_numeric_comparable_rate",
+        "next_5_frame_sequence_game_turn_delta_exact_rate",
+        "next_5_frame_sequence_message_normalized_exact_rate",
+        "next_5_frame_sequence_message_edit_similarity",
         "next_10_frame_sequence_parse_valid_rate",
         "next_10_frame_sequence_available_window_count",
         "next_10_frame_sequence_available_frame_count",
@@ -640,6 +905,18 @@ def build_score_to_beat_report(
         "next_10_frame_sequence_char_accuracy",
         "next_10_frame_sequence_map_line_exact_rate",
         "next_10_frame_sequence_message_exact_rate",
+        "next_10_frame_sequence_player_coordinate_exact_rate",
+        "next_10_frame_sequence_changed_map_cell_precision",
+        "next_10_frame_sequence_changed_map_cell_recall",
+        "next_10_frame_sequence_changed_map_cell_f1",
+        "next_10_frame_sequence_unchanged_map_cell_copy_rate",
+        "next_10_frame_sequence_blstats_parse_valid_rate",
+        "next_10_frame_sequence_blstats_field_exact_rate",
+        "next_10_frame_sequence_blstats_numeric_mae",
+        "next_10_frame_sequence_blstats_numeric_comparable_rate",
+        "next_10_frame_sequence_game_turn_delta_exact_rate",
+        "next_10_frame_sequence_message_normalized_exact_rate",
+        "next_10_frame_sequence_message_edit_similarity",
     ),
 ) -> dict[str, Any]:
     """Compare trained metrics against a baseline and return a proof report."""
@@ -780,6 +1057,12 @@ def build_training_proof_gate_report(
                 mode="not_regressed",
                 reason="generated next-frame parse validity must not regress",
             ),
+            _metric_requirement(
+                score_metrics,
+                "next_frame_teacher_forced_mean_nll",
+                mode="not_regressed",
+                reason="teacher-forced dynamics likelihood must not regress",
+            ),
         ]
     )
     for horizon in (1, 5, 10):
@@ -800,15 +1083,36 @@ def build_training_proof_gate_report(
                 ),
                 _metric_requirement(
                     score_metrics,
-                    f"{prefix}_char_accuracy",
+                    f"{prefix}_changed_map_cell_f1",
                     mode="improved",
-                    reason=f"next-{horizon} generated sequence character accuracy must improve",
+                    reason=(
+                        f"next-{horizon} generated sequence changed-map-cell F1 "
+                        "must improve"
+                    ),
                 ),
                 _metric_requirement(
                     score_metrics,
                     f"{prefix}_exact_match_rate",
                     mode="not_regressed",
                     reason=f"next-{horizon} exact frame match must not regress",
+                ),
+                _metric_requirement(
+                    score_metrics,
+                    f"{prefix}_player_coordinate_exact_rate",
+                    mode="not_regressed",
+                    reason=f"next-{horizon} player-coordinate accuracy must not regress",
+                ),
+                _metric_requirement(
+                    score_metrics,
+                    f"{prefix}_blstats_field_exact_rate",
+                    mode="not_regressed",
+                    reason=f"next-{horizon} BLSTATS field accuracy must not regress",
+                ),
+                _metric_requirement(
+                    score_metrics,
+                    f"{prefix}_message_edit_similarity",
+                    mode="not_regressed",
+                    reason=f"next-{horizon} message similarity must not regress",
                 ),
             ]
         )
@@ -978,7 +1282,7 @@ def _metric_direction(metric_name: str) -> str:
     }
     if metric_name.endswith("_window_count") or metric_name.endswith("_frame_count"):
         return "higher_is_better"
-    if metric_name in lower_is_better:
+    if metric_name in lower_is_better or metric_name.endswith("_mae"):
         return "lower_is_better"
     return "higher_is_better"
 

@@ -17,17 +17,19 @@ from learn_nethack.action_manifest import (
     load_action_manifest,
 )
 from learn_nethack.cli import app
-from learn_nethack.cli import resolve_build_row_limit
+from learn_nethack.cli import resolve_build_row_limit, resolve_split_row_limits
 from learn_nethack.nld_decode import normalize_decoded_batch, normalize_frame_only_batch
 from learn_nethack.nld_metadata import (
     classify_sft_label_readiness,
     inspect_nld_db,
+    order_gameids_for_split_role_coverage,
     split_gameids,
 )
 from learn_nethack.observations import render_observation_text
 from learn_nethack.pseudo_labels import infer_visible_movement_pseudo_label
 import learn_nethack.sft_build as sft_build
 from learn_nethack.sft_build import (
+    SplitRowLimits,
     build_pseudo_label_sft_from_frame_batches,
     build_sft_from_decoded_batches,
     merge_sft_dataset_shards,
@@ -87,12 +89,14 @@ def _passing_policy_and_next_frame_score_report() -> dict:
         "action_space_valid_rate": 1.0,
         "exact_match_rate": 0.30,
         "next_frame_parse_valid_rate": 1.0,
+        "next_frame_teacher_forced_mean_nll": 1.0,
     }
     trained_metrics = {
         "parse_valid_rate": 1.0,
         "action_space_valid_rate": 1.0,
         "exact_match_rate": 0.31,
         "next_frame_parse_valid_rate": 1.0,
+        "next_frame_teacher_forced_mean_nll": 0.9,
     }
     for horizon, baseline_accuracy, trained_accuracy in (
         (1, 0.50, 0.60),
@@ -110,6 +114,10 @@ def _passing_policy_and_next_frame_score_report() -> dict:
                 f"next_{horizon}_frame_sequence_parse_valid_rate": 1.0,
                 f"next_{horizon}_frame_sequence_char_accuracy": baseline_accuracy,
                 f"next_{horizon}_frame_sequence_exact_match_rate": 0.0,
+                f"next_{horizon}_frame_sequence_changed_map_cell_f1": baseline_accuracy,
+                f"next_{horizon}_frame_sequence_player_coordinate_exact_rate": 0.5,
+                f"next_{horizon}_frame_sequence_blstats_field_exact_rate": 0.5,
+                f"next_{horizon}_frame_sequence_message_edit_similarity": 0.5,
             }
         )
         trained_metrics.update(
@@ -123,6 +131,10 @@ def _passing_policy_and_next_frame_score_report() -> dict:
                 f"next_{horizon}_frame_sequence_parse_valid_rate": 1.0,
                 f"next_{horizon}_frame_sequence_char_accuracy": trained_accuracy,
                 f"next_{horizon}_frame_sequence_exact_match_rate": 0.0,
+                f"next_{horizon}_frame_sequence_changed_map_cell_f1": trained_accuracy,
+                f"next_{horizon}_frame_sequence_player_coordinate_exact_rate": 0.5,
+                f"next_{horizon}_frame_sequence_blstats_field_exact_rate": 0.5,
+                f"next_{horizon}_frame_sequence_message_edit_similarity": 0.5,
             }
         )
     return build_score_to_beat_report(
@@ -295,6 +307,33 @@ def _decoded_transitions():
     return list(normalize_decoded_batch(batch))
 
 
+class _TrackedArray:
+    def __init__(
+        self,
+        value: object,
+        *,
+        tolist_paths: list[tuple[int, ...]],
+        path: tuple[int, ...] = (),
+    ) -> None:
+        self._value = value
+        self._tolist_paths = tolist_paths
+        self._path = path
+
+    def __getitem__(self, index: int) -> object:
+        value = self._value[index]  # type: ignore[index]
+        if isinstance(value, list):
+            return _TrackedArray(
+                value,
+                tolist_paths=self._tolist_paths,
+                path=(*self._path, index),
+            )
+        return value
+
+    def tolist(self) -> object:
+        self._tolist_paths.append(self._path)
+        return self._value
+
+
 class NldSftDataLoopTests(unittest.TestCase):
     def test_inspect_nld_db_reads_metadata_counts(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -357,6 +396,43 @@ class NldSftDataLoopTests(unittest.TestCase):
         self.assertFalse(set(splits.train) & set(splits.validation))
         self.assertFalse(set(splits.train) & set(splits.test))
         self.assertEqual(split_gameids([1, 2, 3, 4, 5], seed=20260615), splits)
+
+    def test_split_role_order_frontloads_heldout_role_coverage(self) -> None:
+        gameids = list(range(1, 601))
+        metadata = {
+            gameid: {"role": ("Arc", "Hea", "Wiz")[gameid % 3]} for gameid in gameids
+        }
+        splits = split_gameids(gameids, seed=17)
+        split_by_gameid = {
+            gameid: split
+            for split, values in (
+                ("train", splits.train),
+                ("validation", splits.validation),
+                ("test", splits.test),
+            )
+            for gameid in values
+        }
+
+        ordered = order_gameids_for_split_role_coverage(
+            gameids,
+            game_metadata_by_id=metadata,
+            seed=17,
+        )
+        prefix_pairs = {
+            (split_by_gameid[gameid], metadata[gameid]["role"])
+            for gameid in ordered[:9]
+        }
+
+        self.assertEqual(sorted(ordered), gameids)
+        self.assertEqual(len(ordered), len(set(ordered)))
+        self.assertEqual(
+            prefix_pairs,
+            {
+                (split, role)
+                for split in ("train", "validation", "test")
+                for role in ("Arc", "Hea", "Wiz")
+            },
+        )
 
     def test_action_manifest_maps_raw_key_to_action_id(self) -> None:
         manifest = _manifest()
@@ -497,6 +573,34 @@ class NldSftDataLoopTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full dataset"):
             resolve_build_row_limit(max_rows=64, full_dataset=True)
 
+    def test_resolve_split_row_limits_requires_all_three_positive(self) -> None:
+        limits = resolve_split_row_limits(
+            train_rows=20_000,
+            validation_rows=2_000,
+            test_rows=2_000,
+            full_dataset=False,
+        )
+
+        self.assertEqual(
+            limits,
+            SplitRowLimits(train=20_000, validation=2_000, test=2_000),
+        )
+        self.assertIsNone(
+            resolve_split_row_limits(
+                train_rows=1_000,
+                validation_rows=0,
+                test_rows=0,
+                full_dataset=False,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "all be positive"):
+            resolve_split_row_limits(
+                train_rows=20_000,
+                validation_rows=2_000,
+                test_rows=0,
+                full_dataset=False,
+            )
+
     def test_normalize_decoded_batch_pairs_same_episode_next_observation(self) -> None:
         transitions = _decoded_transitions()
 
@@ -507,6 +611,28 @@ class NldSftDataLoopTests(unittest.TestCase):
         )
         self.assertIsNone(transitions[1].next_observation)
         self.assertIsNone(transitions[2].next_observation)
+
+    def test_normalize_decoded_batch_converts_selected_frame_not_entire_array(
+        self,
+    ) -> None:
+        tolist_paths: list[tuple[int, ...]] = []
+        tty_chars = _TrackedArray(
+            [[[[64, 46]], [[46, 64]]]],
+            tolist_paths=tolist_paths,
+        )
+        batch = {
+            "gameids": [[1, 1]],
+            "steps": [[0, 1]],
+            "keypresses": [[107, 106]],
+            "tty_chars": tty_chars,
+        }
+
+        transitions = list(normalize_decoded_batch(batch))
+
+        self.assertEqual(transitions[0].observation["tty_chars"], [[64, 46]])
+        self.assertNotIn((), tolist_paths)
+        self.assertTrue(tolist_paths)
+        self.assertTrue(all(len(path) == 2 for path in tolist_paths))
 
     def test_normalize_decoded_batch_reports_available_keys_when_actions_missing(
         self,
@@ -1545,6 +1671,210 @@ class NldSftDataLoopTests(unittest.TestCase):
         self.assertEqual(frame_metrics["next_frame_exact_match_rate"], 1.0)
         self.assertEqual(frame_metrics["next_frame_char_accuracy"], 1.0)
 
+    def test_split_row_limits_reserve_validation_and_test_rows(self) -> None:
+        manifest = ActionManifest(
+            env_id="NetHack-v0",
+            entries=(
+                ActionEntry(
+                    action_id=0,
+                    nle_action_name="CompassDirection.N",
+                    raw_key_code=107,
+                    key_label="k",
+                ),
+            ),
+        )
+        observation = {
+            "tty_chars": [[64, 46]],
+            "message": [],
+            "blstats": [0] * 27,
+            "inventory": [],
+        }
+        transitions = [
+            types.SimpleNamespace(
+                gameid=gameid,
+                step=step,
+                raw_key_code=107,
+                observation=observation,
+                next_observation=observation,
+                sequence_id=None,
+                sequence_step=None,
+            )
+            for gameid in (1, 2, 3)
+            for step in range(3)
+        ]
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            result = write_sft_dataset(
+                dataset_name="fixture",
+                mode="single_frame",
+                transitions=transitions,
+                action_manifest=manifest,
+                game_metadata_by_id={},
+                splits={"train": {1}, "validation": {2}, "test": {3}},
+                out_dir=out,
+                tasks=("policy_action",),
+                split_row_limits=SplitRowLimits(train=2, validation=2, test=2),
+            )
+            counts = {
+                split: len(
+                    (out / f"{split}.policy_action.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                )
+                for split in ("train", "validation", "test")
+            }
+            written_manifest = json.loads(
+                (out / "manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result.accepted_policy_rows, 6)
+        self.assertEqual(counts, {"train": 2, "validation": 2, "test": 2})
+        self.assertEqual(
+            written_manifest["accepted_rows_by_split"],
+            {
+                "train": {"policy_action": 2, "next_frame": 0},
+                "validation": {"policy_action": 2, "next_frame": 0},
+                "test": {"policy_action": 2, "next_frame": 0},
+            },
+        )
+        self.assertEqual(
+            written_manifest["split_quota_skips"],
+            {"train": 1, "validation": 1},
+        )
+        self.assertIs(written_manifest["split_limits_satisfied"], True)
+
+    def test_split_row_limits_write_diagnostic_manifest_then_fail_if_incomplete(
+        self,
+    ) -> None:
+        manifest = ActionManifest(
+            env_id="NetHack-v0",
+            entries=(
+                ActionEntry(
+                    action_id=0,
+                    nle_action_name="CompassDirection.N",
+                    raw_key_code=107,
+                    key_label="k",
+                ),
+            ),
+        )
+        observation = {
+            "tty_chars": [[64, 46]],
+            "message": [],
+            "blstats": [0] * 27,
+            "inventory": [],
+        }
+        transitions = [
+            types.SimpleNamespace(
+                gameid=1,
+                step=0,
+                raw_key_code=107,
+                observation=observation,
+                next_observation=observation,
+                sequence_id=None,
+                sequence_step=None,
+            )
+        ]
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            with self.assertRaisesRegex(RuntimeError, "split row limits not satisfied"):
+                write_sft_dataset(
+                    dataset_name="fixture",
+                    mode="single_frame",
+                    transitions=transitions,
+                    action_manifest=manifest,
+                    game_metadata_by_id={},
+                    splits={"train": {1}, "validation": {2}, "test": {3}},
+                    out_dir=out,
+                    tasks=("policy_action",),
+                    split_row_limits=SplitRowLimits(train=1, validation=1, test=1),
+                )
+            written_manifest = json.loads(
+                (out / "manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertIs(written_manifest["split_limits_satisfied"], False)
+        self.assertEqual(
+            written_manifest["accepted_rows_by_split"]["train"]["policy_action"],
+            1,
+        )
+
+    def test_split_row_limits_cannot_be_combined_with_global_limit(self) -> None:
+        with (
+            TemporaryDirectory() as tmp,
+            self.assertRaisesRegex(ValueError, "max_rows or split_row_limits"),
+        ):
+            write_sft_dataset(
+                dataset_name="fixture",
+                mode="single_frame",
+                transitions=[],
+                action_manifest=ActionManifest(env_id="NetHack-v0", entries=()),
+                game_metadata_by_id={},
+                splits={"train": set(), "validation": set(), "test": set()},
+                out_dir=tmp,
+                max_rows=1,
+                tasks=("policy_action",),
+                split_row_limits=SplitRowLimits(train=1, validation=1, test=1),
+            )
+
+    def test_changed_state_metrics_do_not_reward_copying_current_frame(self) -> None:
+        current_blstats = [0] * 27
+        current_blstats[20] = 10
+        next_blstats = list(current_blstats)
+        next_blstats[0] = 1
+        next_blstats[20] = 11
+        current = "\n".join(
+            [
+                "MAP:",
+                "@.",
+                "MESSAGE:",
+                "You wait.",
+                "BLSTATS:",
+                json.dumps(current_blstats),
+                "INVENTORY:",
+                "<empty>",
+            ]
+        )
+        following = "\n".join(
+            [
+                "MAP:",
+                ".@",
+                "MESSAGE:",
+                "You move east.",
+                "BLSTATS:",
+                json.dumps(next_blstats),
+                "INVENTORY:",
+                "<empty>",
+            ]
+        )
+
+        copy_metrics = compute_next_frame_metrics(
+            current_frames=[current],
+            predictions=[current],
+            labels=[following],
+        )
+        perfect_metrics = compute_next_frame_metrics(
+            current_frames=[current],
+            predictions=[following],
+            labels=[following],
+        )
+
+        self.assertEqual(copy_metrics["next_frame_changed_map_cell_f1"], 0.0)
+        self.assertEqual(copy_metrics["next_frame_player_coordinate_exact_rate"], 0.0)
+        self.assertEqual(perfect_metrics["next_frame_changed_map_cell_precision"], 1.0)
+        self.assertEqual(perfect_metrics["next_frame_changed_map_cell_recall"], 1.0)
+        self.assertEqual(perfect_metrics["next_frame_changed_map_cell_f1"], 1.0)
+        self.assertEqual(
+            perfect_metrics["next_frame_player_coordinate_exact_rate"], 1.0
+        )
+        self.assertEqual(perfect_metrics["next_frame_blstats_field_exact_rate"], 1.0)
+        self.assertEqual(perfect_metrics["next_frame_blstats_numeric_mae"], 0.0)
+        self.assertEqual(perfect_metrics["next_frame_game_turn_delta_exact_rate"], 1.0)
+        self.assertEqual(
+            perfect_metrics["next_frame_message_normalized_exact_rate"], 1.0
+        )
+
     def test_evaluate_policy_rows_scores_constrained_action_candidates(self) -> None:
         policy = AlwaysSouthPolicy()
         rows = [
@@ -2013,6 +2343,7 @@ class NldSftDataLoopTests(unittest.TestCase):
         report = build_score_to_beat_report(
             baseline_metrics={
                 "next_frame_parse_valid_rate": 1.0,
+                "next_frame_teacher_forced_mean_nll": 1.0,
                 "next_frame_map_line_exact_rate": 0.25,
                 "next_frame_message_exact_rate": 0.5,
             },
@@ -2105,6 +2436,7 @@ class NldSftDataLoopTests(unittest.TestCase):
                 "action_space_valid_rate": 1.0,
                 "exact_match_rate": 0.30,
                 "next_frame_parse_valid_rate": 1.0,
+                "next_frame_teacher_forced_mean_nll": 1.0,
                 "next_1_frame_sequence_available_window_count": 2.0,
                 "next_1_frame_sequence_available_frame_count": 2.0,
                 "next_1_frame_sequence_window_count": 2.0,
@@ -2112,6 +2444,10 @@ class NldSftDataLoopTests(unittest.TestCase):
                 "next_1_frame_sequence_parse_valid_rate": 1.0,
                 "next_1_frame_sequence_char_accuracy": 0.50,
                 "next_1_frame_sequence_exact_match_rate": 0.0,
+                "next_1_frame_sequence_changed_map_cell_f1": 0.20,
+                "next_1_frame_sequence_player_coordinate_exact_rate": 0.50,
+                "next_1_frame_sequence_blstats_field_exact_rate": 0.50,
+                "next_1_frame_sequence_message_edit_similarity": 0.50,
                 "next_5_frame_sequence_available_window_count": 2.0,
                 "next_5_frame_sequence_available_frame_count": 10.0,
                 "next_5_frame_sequence_window_count": 2.0,
@@ -2119,6 +2455,10 @@ class NldSftDataLoopTests(unittest.TestCase):
                 "next_5_frame_sequence_parse_valid_rate": 1.0,
                 "next_5_frame_sequence_char_accuracy": 0.40,
                 "next_5_frame_sequence_exact_match_rate": 0.0,
+                "next_5_frame_sequence_changed_map_cell_f1": 0.15,
+                "next_5_frame_sequence_player_coordinate_exact_rate": 0.50,
+                "next_5_frame_sequence_blstats_field_exact_rate": 0.50,
+                "next_5_frame_sequence_message_edit_similarity": 0.50,
                 "next_10_frame_sequence_available_window_count": 2.0,
                 "next_10_frame_sequence_available_frame_count": 20.0,
                 "next_10_frame_sequence_window_count": 2.0,
@@ -2126,12 +2466,17 @@ class NldSftDataLoopTests(unittest.TestCase):
                 "next_10_frame_sequence_parse_valid_rate": 1.0,
                 "next_10_frame_sequence_char_accuracy": 0.30,
                 "next_10_frame_sequence_exact_match_rate": 0.0,
+                "next_10_frame_sequence_changed_map_cell_f1": 0.10,
+                "next_10_frame_sequence_player_coordinate_exact_rate": 0.50,
+                "next_10_frame_sequence_blstats_field_exact_rate": 0.50,
+                "next_10_frame_sequence_message_edit_similarity": 0.50,
             },
             trained_metrics={
                 "parse_valid_rate": 1.0,
                 "action_space_valid_rate": 1.0,
                 "exact_match_rate": 0.31,
                 "next_frame_parse_valid_rate": 1.0,
+                "next_frame_teacher_forced_mean_nll": 0.9,
                 "next_1_frame_sequence_available_window_count": 2.0,
                 "next_1_frame_sequence_available_frame_count": 2.0,
                 "next_1_frame_sequence_window_count": 2.0,
@@ -2139,6 +2484,10 @@ class NldSftDataLoopTests(unittest.TestCase):
                 "next_1_frame_sequence_parse_valid_rate": 1.0,
                 "next_1_frame_sequence_char_accuracy": 0.60,
                 "next_1_frame_sequence_exact_match_rate": 0.0,
+                "next_1_frame_sequence_changed_map_cell_f1": 0.30,
+                "next_1_frame_sequence_player_coordinate_exact_rate": 0.50,
+                "next_1_frame_sequence_blstats_field_exact_rate": 0.50,
+                "next_1_frame_sequence_message_edit_similarity": 0.50,
                 "next_5_frame_sequence_available_window_count": 2.0,
                 "next_5_frame_sequence_available_frame_count": 10.0,
                 "next_5_frame_sequence_window_count": 2.0,
@@ -2146,6 +2495,10 @@ class NldSftDataLoopTests(unittest.TestCase):
                 "next_5_frame_sequence_parse_valid_rate": 1.0,
                 "next_5_frame_sequence_char_accuracy": 0.50,
                 "next_5_frame_sequence_exact_match_rate": 0.0,
+                "next_5_frame_sequence_changed_map_cell_f1": 0.25,
+                "next_5_frame_sequence_player_coordinate_exact_rate": 0.50,
+                "next_5_frame_sequence_blstats_field_exact_rate": 0.50,
+                "next_5_frame_sequence_message_edit_similarity": 0.50,
                 "next_10_frame_sequence_available_window_count": 2.0,
                 "next_10_frame_sequence_available_frame_count": 20.0,
                 "next_10_frame_sequence_window_count": 2.0,
@@ -2153,6 +2506,10 @@ class NldSftDataLoopTests(unittest.TestCase):
                 "next_10_frame_sequence_parse_valid_rate": 1.0,
                 "next_10_frame_sequence_char_accuracy": 0.45,
                 "next_10_frame_sequence_exact_match_rate": 0.0,
+                "next_10_frame_sequence_changed_map_cell_f1": 0.20,
+                "next_10_frame_sequence_player_coordinate_exact_rate": 0.50,
+                "next_10_frame_sequence_blstats_field_exact_rate": 0.50,
+                "next_10_frame_sequence_message_edit_similarity": 0.50,
             },
             baseline_run_id="base",
             trained_run_id="trained",
@@ -2338,6 +2695,7 @@ class NldSftDataLoopTests(unittest.TestCase):
                 "next_10_frame_sequence_frame_count": 40.0,
                 "next_10_frame_sequence_parse_valid_rate": 1.0,
                 "next_10_frame_sequence_char_accuracy": 0.62,
+                "next_10_frame_sequence_changed_map_cell_f1": 0.62,
                 "next_10_frame_sequence_exact_match_rate": 0.0,
             },
             trained_metrics={
@@ -2365,6 +2723,7 @@ class NldSftDataLoopTests(unittest.TestCase):
                 "next_10_frame_sequence_frame_count": 40.0,
                 "next_10_frame_sequence_parse_valid_rate": 1.0,
                 "next_10_frame_sequence_char_accuracy": 0.61,
+                "next_10_frame_sequence_changed_map_cell_f1": 0.61,
                 "next_10_frame_sequence_exact_match_rate": 0.0,
             },
             baseline_run_id="base",
@@ -2421,7 +2780,7 @@ class NldSftDataLoopTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertEqual(report["verdict"], "failed")
         self.assertIn("exact_match_rate", failed_names)
-        self.assertIn("next_10_frame_sequence_char_accuracy", failed_names)
+        self.assertIn("next_10_frame_sequence_changed_map_cell_f1", failed_names)
         self.assertIn("watch_current_score_or_depth_progress", failed_names)
         self.assertIn("watch_score_or_depth_progress", failed_names)
 

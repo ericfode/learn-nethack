@@ -1,0 +1,101 @@
+{
+  "benchmarks": [
+    {
+      "agent": "Claude-Opus-4.5",
+      "benchmark_id": "balrog-nethack-llm-leader-2026-02-24",
+      "candidate_metric": "balrog_nethack_progress_percent",
+      "comparison": "candidate_lower_at_least_target_lower",
+      "lane": "llm_agent",
+      "protocol_id": "balrog-nethack-llm",
+      "required_for_competitive": true,
+      "source": "https://balrogai.com/",
+      "source_date": "2026-02-24",
+      "target": {
+        "estimate": 2.0,
+        "lower": 1.5,
+        "reported_uncertainty": 0.5,
+        "unit": "percent_progress"
+      }
+    },
+    {
+      "agent": "HiHack hierarchical neural policy with RL",
+      "benchmark_id": "hihack-learned-agent-mean-score-2023",
+      "candidate_metric": "mean_nle_score",
+      "comparison": "candidate_lower_at_least_target_estimate",
+      "lane": "learned_nle_agent",
+      "protocol_id": "nle-challenge-full-episode",
+      "required_for_competitive": true,
+      "source": "https://arxiv.org/abs/2305.19240",
+      "source_date": "2023-10-30",
+      "target": {
+        "estimate": 1551.0,
+        "unit": "mean_nle_score"
+      }
+    },
+    {
+      "agent": "Sample Factory APPO baseline",
+      "benchmark_id": "sample-factory-neural-baseline-2021",
+      "candidate_metric": "mean_nle_score",
+      "comparison": "candidate_lower_at_least_target_estimate",
+      "lane": "learned_nle_agent_milestone",
+      "protocol_id": "nle-challenge-full-episode",
+      "required_for_competitive": false,
+      "source": "https://github.com/Miffyli/nle-sample-factory-baseline",
+      "source_date": "2021-06-18",
+      "target": {
+        "estimate": 800.0,
+        "reported_range": [
+          700.0,
+          800.0
+        ],
+        "reported_median": 400.0,
+        "unit": "mean_nle_reward"
+      }
+    },
+    {
+      "agent": "AutoAscend",
+      "benchmark_id": "nethack-challenge-symbolic-winner-2021",
+      "candidate_metric": null,
+      "comparison": "reference_only",
+      "lane": "symbolic_reference",
+      "protocol_id": "nle-challenge-full-episode",
+      "required_for_competitive": false,
+      "source": "https://arxiv.org/abs/2203.11889",
+      "source_date": "2022-03-22",
+      "target": {
+        "note": "Report the matched score and role gap; symbolic agents exceeded neural median score by more than fourfold.",
+        "unit": "nle_score"
+      }
+    },
+    {
+      "agent": "Human NetHack players",
+      "benchmark_id": "human-ascension-reference",
+      "candidate_metric": null,
+      "comparison": "reference_only",
+      "lane": "human_reference",
+      "protocol_id": "nethack-full-game",
+      "required_for_competitive": false,
+      "source": "https://arxiv.org/abs/2305.19240",
+      "source_date": "2023-10-30",
+      "target": {
+        "note": "Report ascension rate and score/depth gap only under a matched full-game protocol.",
+        "unit": "ascension_and_nethack_score"
+      }
+    }
+  ],
+  "captured_at": "2026-07-09",
+  "competitive_definition": {
+    "internal_training_proof_required": true,
+    "reference_lanes_must_be_reported": [
+      "symbolic_reference",
+      "human_reference"
+    ],
+    "required_external_benchmark_ids": [
+      "balrog-nethack-llm-leader-2026-02-24",
+      "hihack-learned-agent-mean-score-2023"
+    ],
+    "rule": "Pass every required external benchmark under its exact protocol with a candidate lower confidence bound at or above the frozen target."
+  },
+  "refresh_before_external_evaluation": true,
+  "schema_version": "learn-nethack.benchmark-registry.v1"
+}

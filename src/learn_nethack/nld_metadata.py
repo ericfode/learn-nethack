@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
@@ -367,3 +368,49 @@ def split_gameids(
         else:
             test.append(gameid)
     return GameSplit(train=train, validation=validation, test=test)
+
+
+def order_gameids_for_split_role_coverage(
+    gameids: list[int],
+    *,
+    game_metadata_by_id: dict[int, dict],
+    seed: int,
+) -> list[int]:
+    """Round-robin split and role so capped builds do not fill from few games."""
+    splits = split_gameids(gameids, seed=seed)
+    split_by_gameid = {
+        int(gameid): split
+        for split, values in (
+            ("train", splits.train),
+            ("validation", splits.validation),
+            ("test", splits.test),
+        )
+        for gameid in values
+    }
+    grouped: dict[tuple[str, str], deque[int]] = defaultdict(deque)
+    for gameid in sorted(gameids, key=lambda value: (_bucket(value, seed + 1), value)):
+        split = split_by_gameid[int(gameid)]
+        role = str(game_metadata_by_id.get(int(gameid), {}).get("role") or "<missing>")
+        grouped[(split, role)].append(int(gameid))
+
+    roles = sorted({role for _split, role in grouped})
+    split_order = ("validation", "test", "train")
+    ordered: list[int] = []
+    while grouped:
+        made_progress = False
+        for role in roles:
+            for split in split_order:
+                key = (split, role)
+                values = grouped.get(key)
+                if not values:
+                    continue
+                ordered.append(values.popleft())
+                made_progress = True
+                if not values:
+                    del grouped[key]
+        if not made_progress:
+            raise RuntimeError("failed to order game IDs for split and role coverage")
+
+    if sorted(ordered) != sorted(gameids):
+        raise RuntimeError("split-role game ordering lost or duplicated game IDs")
+    return ordered

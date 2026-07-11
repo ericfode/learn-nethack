@@ -51,7 +51,7 @@ def _optional_value(
 ) -> Any:
     if key not in batch:
         return default
-    return _value_at(_list_value(batch[key]), coordinates, default)
+    return _list_value(_value_at(batch[key], coordinates, default))
 
 
 def _timestamp_sequence_id(
