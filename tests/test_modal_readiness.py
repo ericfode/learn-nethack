@@ -273,12 +273,11 @@ class ModalReadinessTests(unittest.TestCase):
         )
         self.assertEqual(
             commands["run_watch_compare"],
-            "WANDB_MODE=offline modal run "
-            "src/learn_nethack/modal_train.py::watch_compare "
+            "modal run src/learn_nethack/modal_train.py::watch_compare "
             "--run-id watch-10 "
             "--action-manifest /datasets/action_manifest.json "
-            "--env-id NetHack-v0 "
-            "--model-name google/gemma-4-E2b-it "
+            "--env-id NetHackChallenge-v0 "
+            "--model-name google/gemma-4-E4b-it "
             "--max-steps 10",
         )
 
@@ -400,10 +399,13 @@ class ModalReadinessTests(unittest.TestCase):
             commands["watch_compare_score_damage"],
         )
         self.assertIn(
-            "--action-manifest /datasets/action_manifest_nethack_v0.json",
+            "--action-manifest /datasets/action_manifest.json",
             commands["watch_compare_score_damage"],
         )
-        self.assertIn("--env-id NetHack-v0", commands["watch_compare_score_damage"])
+        self.assertIn(
+            "--env-id NetHackChallenge-v0",
+            commands["watch_compare_score_damage"],
+        )
         self.assertIn(
             "--character mon-hum-neu-mal",
             commands["watch_compare_score_damage"],

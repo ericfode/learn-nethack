@@ -28,6 +28,8 @@ from learn_nethack.compare_watch import (
     seed_nle_env,
     select_action_id,
     summarize_rollout_events,
+    validate_action_manifest_env_id,
+    validate_action_manifest_for_env,
 )
 
 
@@ -124,6 +126,16 @@ class SmallActionSpaceEnv(FakeEnv):
         self.actions = tuple(range(1))
 
 
+class MatchingActionSpaceEnv(FakeEnv):
+    @property
+    def unwrapped(self):
+        return self
+
+    def __init__(self, label: str = "matching"):
+        super().__init__(label)
+        self.actions = (107, 106)
+
+
 class SeedableEnv(FakeEnv):
     @property
     def unwrapped(self):
@@ -210,6 +222,52 @@ class CacheClearingPolicy(TransformerCandidatePolicy):
 
 
 class CompareWatchTests(unittest.TestCase):
+    def test_action_manifest_matches_live_env_ids_and_raw_key_order(self) -> None:
+        validate_action_manifest_for_env(
+            _manifest(),
+            env_id="NetHackChallenge-v0",
+            env=MatchingActionSpaceEnv(),
+        )
+
+    def test_action_manifest_rejects_environment_id_mismatch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "environment mismatch"):
+            validate_action_manifest_env_id(
+                _manifest(),
+                env_id="NetHack-v0",
+            )
+
+    def test_action_manifest_rejects_live_action_space_mismatch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "id sequence"):
+            validate_action_manifest_for_env(
+                _manifest(),
+                env_id="NetHackChallenge-v0",
+                env=SmallActionSpaceEnv("small"),
+            )
+
+        wrong_raw_key_order = ActionManifest(
+            env_id="NetHackChallenge-v0",
+            entries=(
+                ActionEntry(
+                    action_id=0,
+                    nle_action_name="CompassDirection.N",
+                    raw_key_code=106,
+                    key_label="j",
+                ),
+                ActionEntry(
+                    action_id=1,
+                    nle_action_name="CompassDirection.S",
+                    raw_key_code=107,
+                    key_label="k",
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "raw key ordering"):
+            validate_action_manifest_for_env(
+                wrong_raw_key_order,
+                env_id="NetHackChallenge-v0",
+                env=MatchingActionSpaceEnv(),
+            )
+
     def test_watch_extra_contains_runtime_deps_without_training_stack(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
 

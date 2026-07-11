@@ -40,6 +40,8 @@ from learn_nethack.full_build_readiness import (
 )
 from learn_nethack.modal_config import (
     DEFAULT_NEXT_FRAME_MAX_NEW_TOKENS,
+    DEFAULT_WATCH_ACTION_MANIFEST,
+    DEFAULT_WATCH_ENV_ID,
     DEFAULT_WATCH_PROOF_SEEDS,
     sft_existing_dataset_followup_commands,
 )
@@ -743,12 +745,12 @@ def full_build_followup(
         help="Optional run id for the score/damage watch comparison.",
     ),
     watch_action_manifest: str = typer.Option(
-        "/datasets/action_manifest_nethack_v0.json",
+        DEFAULT_WATCH_ACTION_MANIFEST,
         "--watch-action-manifest",
         help="Remote action manifest for deterministic live watch proof.",
     ),
     watch_env_id: str = typer.Option(
-        "NetHack-v0",
+        DEFAULT_WATCH_ENV_ID,
         "--watch-env-id",
         help="NLE env id for deterministic live watch proof.",
     ),

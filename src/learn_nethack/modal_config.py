@@ -14,6 +14,9 @@ PYTHON_VERSION = "3.11"
 MODAL_SOURCE_MODULES = ("learn_nethack",)
 HF_CACHE_MOUNT_PATH = "/cache/huggingface"
 DEFAULT_NEXT_FRAME_MAX_NEW_TOKENS = 512
+DEFAULT_WATCH_ENV_ID = "NetHackChallenge-v0"
+DEFAULT_WATCH_MODEL_NAME = "google/gemma-4-E4b-it"
+DEFAULT_WATCH_ACTION_MANIFEST = "/datasets/action_manifest.json"
 DEFAULT_WATCH_PROOF_SEEDS = (
     "20260615,20260616,20260617,20260618,"
     "20260619,20260620,20260621,20260622,"
@@ -276,8 +279,8 @@ def watch_compare_commands(
     action_manifest_path: str = "artifacts/action_manifest.json",
     action_manifest_volume_path: str = "/action_manifest.json",
     remote_action_manifest: str = "/datasets/action_manifest.json",
-    env_id: str = "NetHack-v0",
-    model_name: str = "google/gemma-4-E2b-it",
+    env_id: str = DEFAULT_WATCH_ENV_ID,
+    model_name: str = DEFAULT_WATCH_MODEL_NAME,
     max_steps: int = 10,
     current_checkpoint: str | None = None,
 ) -> dict[str, str]:
@@ -291,8 +294,7 @@ def watch_compare_commands(
             f"{action_manifest_path} {action_manifest_volume_path}"
         ),
         "run_watch_compare": (
-            "WANDB_MODE=offline modal run "
-            "src/learn_nethack/modal_train.py::watch_compare "
+            "modal run src/learn_nethack/modal_train.py::watch_compare "
             f"--run-id {run_id} "
             f"--action-manifest {remote_action_manifest} "
             f"--env-id {env_id} "
@@ -384,8 +386,8 @@ def sft_existing_dataset_followup_commands(
     next_frame_sequence_horizons: str = "1,5,10",
     next_frame_sequence_max_windows: int = 64,
     watch_run_id: str | None = None,
-    watch_action_manifest: str = "/datasets/action_manifest_nethack_v0.json",
-    watch_env_id: str = "NetHack-v0",
+    watch_action_manifest: str = DEFAULT_WATCH_ACTION_MANIFEST,
+    watch_env_id: str = DEFAULT_WATCH_ENV_ID,
     watch_character: str = "mon-hum-neu-mal",
     watch_seeds: str = DEFAULT_WATCH_PROOF_SEEDS,
     watch_max_steps: int = 80,

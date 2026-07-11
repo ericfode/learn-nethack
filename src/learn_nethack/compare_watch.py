@@ -81,6 +81,56 @@ class NetHackEnv(Protocol):
     def close(self) -> None: ...
 
 
+def validate_action_manifest_env_id(
+    action_manifest: ActionManifest,
+    *,
+    env_id: str,
+) -> None:
+    """Require the action manifest to name the environment being evaluated."""
+    if action_manifest.env_id != env_id:
+        raise ValueError(
+            "action manifest environment mismatch: "
+            f"manifest={action_manifest.env_id!r}, requested={env_id!r}"
+        )
+
+
+def validate_action_manifest_for_env(
+    action_manifest: ActionManifest,
+    *,
+    env_id: str,
+    env: NetHackEnv,
+) -> None:
+    """Require manifest ids and raw key ordering to match the live NLE env."""
+    validate_action_manifest_env_id(action_manifest, env_id=env_id)
+    target = getattr(env, "unwrapped", env)
+    actions = getattr(target, "actions", None)
+    if actions is None:
+        raise RuntimeError(
+            f"NLE environment {env_id!r} does not expose an action sequence"
+        )
+
+    expected_action_ids = list(range(len(actions)))
+    manifest_action_ids = action_manifest.valid_action_ids()
+    if manifest_action_ids != expected_action_ids:
+        raise ValueError(
+            "action manifest id sequence does not match the live NLE action space: "
+            f"manifest={manifest_action_ids}, expected={expected_action_ids}"
+        )
+
+    try:
+        env_raw_keys = [int(action) for action in actions]
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"NLE environment {env_id!r} exposes a non-integer action"
+        ) from exc
+    manifest_raw_keys = [entry.raw_key_code for entry in action_manifest.entries]
+    if manifest_raw_keys != env_raw_keys:
+        raise ValueError(
+            "action manifest raw key ordering does not match the live NLE action "
+            f"space: manifest={manifest_raw_keys}, expected={env_raw_keys}"
+        )
+
+
 def parse_seed_list(seeds: str | Sequence[int]) -> list[int]:
     """Parse a comma-separated seed list for deterministic watch sweeps."""
     if isinstance(seeds, str):
@@ -348,6 +398,16 @@ def run_checkpoint_compare(
     current_env = make_nle_env(env_id, character=character)
     baseline_env = make_nle_env(env_id, character=character)
     try:
+        validate_action_manifest_for_env(
+            manifest,
+            env_id=env_id,
+            env=current_env,
+        )
+        validate_action_manifest_for_env(
+            manifest,
+            env_id=env_id,
+            env=baseline_env,
+        )
         return run_side_by_side_rollout(
             run_id=run_id,
             current_spec=current_spec,
@@ -381,6 +441,16 @@ def run_checkpoint_compare_sweep(
 ) -> dict[str, Any]:
     """Run a multi-seed checkpoint comparison while reusing loaded policies."""
     manifest = load_action_manifest(action_manifest_path)
+    validate_action_manifest_env_id(manifest, env_id=env_id)
+    probe_env = make_nle_env(env_id, character=character)
+    try:
+        validate_action_manifest_for_env(
+            manifest,
+            env_id=env_id,
+            env=probe_env,
+        )
+    finally:
+        probe_env.close()
     seed_values = parse_seed_list(seeds)
     current_spec = ModelWatchSpec(
         role="current",
@@ -1129,6 +1199,7 @@ def write_compare_watch_contract(
 ) -> dict[str, Any]:
     """Write a dry-run contract for a compare-watch run without heavy deps."""
     manifest = load_action_manifest(action_manifest_path)
+    validate_action_manifest_env_id(manifest, env_id=env_id)
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
     contract = {
@@ -1177,6 +1248,7 @@ def write_compare_watch_sweep_contract(
 ) -> dict[str, Any]:
     """Write a dry-run multi-seed watch contract without heavy deps."""
     manifest = load_action_manifest(action_manifest_path)
+    validate_action_manifest_env_id(manifest, env_id=env_id)
     seed_values = parse_seed_list(seeds)
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
