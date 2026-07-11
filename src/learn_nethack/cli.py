@@ -160,6 +160,7 @@ def build_sft(
     ),
     batch_size: int = typer.Option(128, "--batch-size"),
     seq_length: int = typer.Option(32, "--seq-length"),
+    token_budget: int = typer.Option(2_048, "--token-budget"),
     progress_interval: int = typer.Option(5_000, "--progress-interval"),
     seed: int = typer.Option(20260615, "--seed"),
     wandb_project: str = typer.Option("learn-nethack", "--wandb-project"),
@@ -233,6 +234,7 @@ def build_sft(
         progress_callback=_write_progress,
         progress_interval=progress_interval,
         game_order_strategy=game_order_strategy,
+        token_budget=token_budget,
     )
     wandb_mode = log_sft_build_to_wandb(
         output_dir=out,
@@ -248,6 +250,7 @@ def build_sft(
             "tasks": list(task_names),
             "batch_size": batch_size,
             "seq_length": seq_length,
+            "token_budget": token_budget,
             "max_rows": effective_max_rows,
             "split_row_limits": (
                 split_row_limits.as_dict() if split_row_limits is not None else None

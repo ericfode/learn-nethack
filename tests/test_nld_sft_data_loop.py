@@ -1641,6 +1641,7 @@ class NldSftDataLoopTests(unittest.TestCase):
                 max_rows=10,
                 seed=20260615,
                 tasks=("policy_action", "next_frame"),
+                token_budget=512,
             )
 
             manifest = json.loads(
@@ -1648,6 +1649,7 @@ class NldSftDataLoopTests(unittest.TestCase):
             )
 
         self.assertEqual(result.accepted_policy_rows, 2)
+        self.assertEqual(manifest["token_budget"], 512)
         self.assertEqual(result.accepted_next_frame_rows, 1)
         self.assertEqual(manifest["dataset_name"], "fixture-nld")
 

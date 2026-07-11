@@ -96,6 +96,8 @@ def write_sft_dataset(
     game_order_strategy: str = "source_order",
 ) -> SftBuildResult:
     _validate_row_limit_contract(max_rows=max_rows, split_row_limits=split_row_limits)
+    if token_budget <= 0:
+        raise ValueError("token_budget must be positive")
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
     rejection_reasons: Counter[str] = Counter()
@@ -303,6 +305,7 @@ def write_sft_dataset(
         "split_limits_satisfied": split_limits_satisfied,
         "split_quota_skips": dict(sorted(split_quota_skips.items())),
         "game_order_strategy": game_order_strategy,
+        "token_budget": token_budget,
         "rejected_rows": total_rejected,
         "next_frame_status": "ok" if accepted_next_frame_rows else "no_rows",
     }
@@ -534,6 +537,8 @@ def write_pseudo_label_policy_dataset(
 ) -> SftBuildResult:
     """Write rows from explicit high-confidence frame-derived action labels."""
     _validate_row_limit_contract(max_rows=max_rows, split_row_limits=split_row_limits)
+    if token_budget <= 0:
+        raise ValueError("token_budget must be positive")
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
     rejection_reasons: Counter[str] = Counter()
@@ -820,6 +825,7 @@ def build_sft_from_decoded_batches(
     progress_interval: int = 1000,
     split_row_limits: SplitRowLimits | None = None,
     game_order_strategy: str = "source_order",
+    token_budget: int = 2048,
 ) -> SftBuildResult:
     splits = split_gameids(gameids, seed=seed)
     split_sets = {
@@ -844,6 +850,7 @@ def build_sft_from_decoded_batches(
         progress_interval=progress_interval,
         split_row_limits=split_row_limits,
         game_order_strategy=game_order_strategy,
+        token_budget=token_budget,
     )
 
 
